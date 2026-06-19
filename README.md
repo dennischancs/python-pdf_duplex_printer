@@ -24,11 +24,17 @@
 ### 本脚本的解决方案
 **通过软件层面的时间控制，绕过硬件缺陷，实现稳定的连续双面打印**：
 
+**双面模式**（长边/短边翻转）：
 1. 将PDF按双面拆分成多个小文件（每个2页）
 2. 逐个发送打印任务
 3. 每次打印后强制等待15秒（或可配置时间）
 4. 让打印机完全完成当前双面任务后再开始下一个
 5. **从软件层面彻底避免连续双面打印导致的卡纸问题**
+
+**单面模式**（无需延迟）：
+1. 不拆分PDF，直接打印整个文件
+2. 无需延迟等待，一次发送完成
+3. 单面打印无卡纸风险，效率最高
 
 ## 💡 设计原理
 
@@ -48,19 +54,45 @@
 
 ### 工作流程
 ```
+双面模式:
 原始PDF → 按双面分割 → 逐批打印 → 延迟等待 → 下一批 → 清理临时文件
   (N页)    (N/2个文件)   (2页/次)   (15秒)     (循环)     (自动)
                                       ↑
                               关键：给打印机足够
                               的机械复位时间
+
+单面模式:
+原始PDF → 直接打印整个文件 → 完成
+  (N页)     (一次发送)        (无延迟)
 ```
 
 ### 技术要点
-1. **智能分割**: 使用 `pypdf` 库按页拆分PDF，每2页一组（对应一张纸的正反面）
-2. **批量打印**: 调用 Adobe Acrobat Reader 的命令行接口进行打印
-3. **延迟控制**: 每批打印后强制等待15秒（针对MFC-7480D优化），确保打印机机械结构完全复位
-4. **双面配置**: 自动配置打印机为双面打印模式（长边/短边可选）
+1. **智能分割**: 双面模式下使用 `pypdf` 库按页拆分PDF，每2页一组（对应一张纸的正反面）；单面模式不拆分
+2. **多引擎打印**: 支持 SumatraPDF（推荐）、Acrobat Reader、系统默认三种打印引擎，自动选择最优方案
+3. **延迟控制**: 仅双面模式需要延迟，每批打印后强制等待15秒（针对MFC-7480D优化），确保打印机机械结构完全复位；单面模式自动跳过延迟
+4. **双面配置**: 自动配置打印机为双面打印模式（长边/短边可选），SumatraPDF引擎通过打印参数控制
 5. **自动清理**: 临时文件存放在系统临时目录，打印完成后自动删除
+
+### 打印引擎系统
+
+脚本支持三种打印引擎，按优先级自动选择（可通过 `-e`/`--engine` 参数手动指定）：
+
+| 引擎 | 参数值 | 缩放控制 | 双面控制 | 说明 |
+|------|--------|----------|----------|------|
+| **SumatraPDF** | `sumatra` | `-print-settings fit` | `-print-settings duplexlong/short/simplex` | 推荐，同步打印，精确控制，不需要DEVMODE配置 |
+| **Acrobat Reader** | `acrobat` | 隐式（Acrobat默认行为） | DEVMODE配置 | 传统引擎，异步打印 |
+| **系统默认** | `shell` | 取决于系统程序 | DEVMODE配置 | 降级方案，使用系统关联程序 |
+
+**自动选择逻辑** (`--engine auto`，默认):
+1. 首先检查 `vendor/SumatraPDF.exe`（打包内置的便携版）
+2. 然后检查系统PATH和常见安装路径中的 SumatraPDF
+3. 如果未找到SumatraPDF，查找 Acrobat Reader
+4. 如果都未找到，使用 ShellExecute
+
+**SumatraPDF 便携版**:
+- 已内置在打包后的 `vendor/` 目录中，无需额外安装
+- 从 [SumatraPDF官网](https://www.sumatrapdfreader.org/download-free-pdf-viewer) 下载
+- 便携版为单个 exe，无需安装，不写注册表
 
 ### 为什么15秒？
 经过实际测试：
@@ -72,11 +104,13 @@
 
 ```
 pdf_duplex_printer/
-├── pdf_duplex_printer.py    # 核心模块（PDF拆分、打印控制、打印机管理）
+├── pdf_duplex_printer.py    # 核心模块（PDF拆分、打印控制、打印机管理、多引擎支持）
 ├── cli_app.py               # CLI 命令行入口（argparse）
-├── gui_app.py               # GUI 图形界面入口（tkinter）
+├── gui_app.py               # GUI 图形界面入口（tkinter + Tooltip）
 ├── build.spec               # PyInstaller 打包配置
 ├── requirements.txt         # Python 依赖声明
+├── vendor/
+│   └── SumatraPDF.exe       # SumatraPDF 便携版（打印引擎）
 ├── README.md                # 本文档
 └── PDF双面打印延迟控制脚本...txt  # 原始需求
 ```
@@ -86,7 +120,8 @@ pdf_duplex_printer/
 ### 环境要求
 - **操作系统**: Windows（使用了Windows特有的打印API）
 - **Python版本**: Python 3.8+
-- **必需软件**: Adobe Acrobat Reader DC（用于高级打印功能）
+- **打印引擎**: 无需预装（SumatraPDF便携版已内置在 vendor/ 目录）
+- **可选软件**: Adobe Acrobat Reader DC（备用打印引擎）
 
 ### 安装依赖
 
@@ -127,6 +162,12 @@ python cli_app.py document.pdf -p 1
 
 # 短边翻转双面打印
 python cli_app.py document.pdf --duplex short
+
+# 单面打印（无需延迟，直接打印整个文件）
+python cli_app.py document.pdf --duplex none
+
+# 指定打印引擎
+python cli_app.py document.pdf -e sumatra
 ```
 
 #### 辅助命令
@@ -150,8 +191,14 @@ python cli_app.py --help
   pdf_file              要打印的PDF文件路径
 
 可选参数:
-  -d, --delay N         每批打印后的延迟秒数（默认: 15）
+  -d, --delay N         每批打印后的延迟秒数（默认: 15），仅双面模式生效，单面模式自动跳过
   -p, --printer NAME    打印机名称（支持模糊匹配如 'Brother'；或编号如 '1'）
+  -e, --engine {auto,sumatra,acrobat,shell}
+                        打印引擎（默认: auto）
+                         auto: 自动选择 (SumatraPDF > Acrobat > Shell)
+                         sumatra: 强制使用 SumatraPDF
+                         acrobat: 强制使用 Acrobat Reader
+                         shell: 使用系统默认程序
   -l, --list            列出所有可用打印机
   -i, --info            显示打印机当前配置信息
   --duplex {long,short,none}
@@ -191,11 +238,16 @@ python gui_app.py
 界面操作步骤：
 1. 点击「浏览...」选择PDF文件
 2. 从下拉框选择打印机（可点击「刷新」重新加载）
-3. 设置延迟间隔（秒）
-4. 选择双面打印模式（长边翻转/短边翻转/单面）
-5. 点击「开始打印」
-6. 进度条和日志区实时显示打印进度
-7. 可随时点击「取消打印」中断任务
+3. 选择双面打印模式（长边翻转/短边翻转/单面）
+   - 选择「单面」时延迟间隔会自动禁用（单面无需延迟）
+   - 选择双面模式时延迟间隔恢复可编辑
+4. 设置延迟间隔（秒）（仅双面模式可编辑）
+5. 选择打印引擎（auto自动选择/sumatra/acrobat/shell）
+6. 点击「开始打印」
+7. 进度条和日志区实时显示打印进度
+8. 可随时点击「取消打印」中断任务
+
+> **提示**: 将鼠标悬停在任何参数控件上，会显示该参数的用途说明（Tooltip）。
 
 ### 打包后的 exe 使用
 
@@ -206,6 +258,8 @@ dist/pdf-duplex-printer/
 ├── pdf_duplex_printer_cli.exe   # 命令行版（带控制台窗口）
 ├── pdf_duplex_printer_gui.exe   # 图形界面版（无控制台窗口）
 ├── internal/                     # 依赖文件目录
+├── vendor/
+│   └── SumatraPDF.exe           # SumatraPDF 便携版（打印引擎）
 ├── README.md
 └── requirements.txt
 ```
@@ -216,6 +270,8 @@ dist/pdf-duplex-printer/
 ## ⚙️ 配置建议
 
 ### 延迟时间设置
+> **注意**: 延迟仅在双面打印模式（长边/短边翻转）下生效。单面打印模式自动跳过延迟，直接打印整个文件。
+
 不同打印机建议的延迟时间：
 
 | 打印机型号 | 建议延迟 | 说明 |
@@ -241,9 +297,9 @@ dist/pdf-duplex-printer/
 ### 双面打印模式
 | 模式 | 参数 | 说明 |
 |------|------|------|
-| **长边翻转** | `--duplex long`（默认） | 适合竖向文档，翻页像书本 |
-| **短边翻转** | `--duplex short` | 适合横向文档，翻页像记事本 |
-| **单面** | `--duplex none` | 仅单面打印 |
+| **长边翻转** | `--duplex long`（默认） | 适合竖向文档，翻页像书本，需要延迟控制 |
+| **短边翻转** | `--duplex short` | 适合横向文档，翻页像记事本，需要延迟控制 |
+| **单面** | `--duplex none` | 仅单面打印，不拆分PDF，无延迟 |
 
 ## 🔨 构建打包
 
@@ -264,6 +320,8 @@ dist/pdf-duplex-printer/
 ├── pdf_duplex_printer_cli.exe   # CLI 可执行文件
 ├── pdf_duplex_printer_gui.exe   # GUI 可执行文件
 ├── internal/                     # Python 运行时和依赖
+├── vendor/
+│   └── SumatraPDF.exe           # SumatraPDF 便携版（打印引擎）
 ├── README.md
 └── requirements.txt
 ```
@@ -291,11 +349,13 @@ PDF双面打印延迟控制程序
   打印机:     Brother MFC-7480D Printer
   延迟间隔:   20秒
   双面模式:   长边翻转
+  打印引擎:   自动选择
 ============================================================
 
 使用打印机: Brother MFC-7480D Printer
-配置打印机双面打印设置...
-  已配置打印机为 长边翻转 模式
+  打印引擎: SumatraPDF
+  引擎路径: vendor/SumatraPDF.exe
+SumatraPDF引擎，双面通过-print-settings控制，跳过DEVMODE配置
 PDF总页数: 161
 需要打印 81 张纸（双面）
 PDF拆分完成，共 81 个临时文件
@@ -362,11 +422,15 @@ python cli_app.py -l
 ### 问题3: 打印失败或跳页
 **解决方案**：增加延迟时间（`-d` 参数），给打印机更多处理时间。
 
-### 问题4: Adobe Reader未找到
-**解决方案**：
-- 安装 Adobe Acrobat Reader DC
-- 脚本会自动从注册表和常见路径查找 Acrobat
-- 找不到时会自动降级使用系统默认打印方法
+### 问题4: 打印引擎相关
+**说明**: 脚本默认使用 `auto` 模式自动选择打印引擎（优先级: SumatraPDF > Acrobat > Shell）。
+
+**解决方案**:
+- 打包后的 exe 已内置 SumatraPDF 便携版，通常无需额外配置
+- 如果使用 Python 源码运行，请下载 [SumatraPDF 便携版](https://www.sumatrapdfreader.org/download-free-pdf-viewer) 放入 `vendor/` 目录
+- 也可安装 Adobe Acrobat Reader 作为备用引擎
+- 使用 `--engine` 参数（CLI）或下拉框（GUI）手动指定引擎
+- 如果所有引擎都不可用，会降级使用系统默认打印程序
 
 ### 问题5: 临时文件
 **说明**：临时文件存放在系统临时目录（`%TEMP%\pdf_duplex_*`），打印完成后自动删除。如需调试，使用 `--keep-temp` 参数（CLI）或勾选「保留临时文件」（GUI）保留临时文件。
@@ -384,7 +448,7 @@ python cli_app.py -l
    - 如果你的打印机老化严重，建议使用20秒
    - 不要试图缩短延迟时间，否则会重新出现卡纸问题
 
-2. **Adobe Reader推荐**: 虽然脚本可以使用系统默认打印，但Adobe Reader能提供更好的页面缩放和双面打印支持
+2. **打印引擎**: 推荐使用 SumatraPDF（默认自动选择），它支持显式控制缩放和双面模式，且同步打印更可靠。打包版已内置 SumatraPDF 便携版。
 
 3. **延迟时间**: 首次使用建议从较大的延迟开始（如20秒），观察效果后再调整
 

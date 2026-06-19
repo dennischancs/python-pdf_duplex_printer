@@ -1,7 +1,18 @@
 """
 PDF双面打印延迟控制脚本 - 核心模块 (Windows版)
 支持自动页面缩放、横竖向调整和双面打印
-注：先安装acrobat，以使用acrobat的自动处理页面翻转、缩放至纸张尺寸功能
+
+打印引擎优先级 (auto模式): SumatraPDF > Adobe Acrobat > 系统默认(ShellExecute)
+1. SumatraPDF（推荐）:
+   - 同步打印，精确控制缩放和双面模式
+   - 通过 -print-settings 控制双面(fit)和缩放(duplexlong/short/simplex)
+   - 不需要 DEVMODE 配置，不修改打印机全局设置
+   - 有退出码用于错误判断
+2. Adobe Acrobat Reader:
+   - 异步打印（Popen + sleep），双面通过 DEVMODE 配置
+   - 需要安装 Adobe Acrobat Reader
+3. 系统默认(ShellExecute):
+   - 使用系统默认关联程序打印，降级方案
 
 依赖库
 pip install pywin32 pypdf
@@ -68,8 +79,28 @@ PAPER_SIZE_MAP = {
     70: "B5 (ISO)", 71: "A1", 72: "A0", 73: "8K", 74: "10K",
 }
 
+# 打印引擎类型常量
+ENGINE_SUMATRA = "sumatra"
+ENGINE_ACROBAT = "acrobat"
+ENGINE_SHELL = "shell"
+
+# 引擎可读名称
+ENGINE_NAMES = {
+    "sumatra": "SumatraPDF",
+    "acrobat": "Acrobat Reader",
+    "shell": "系统默认(ShellExecute)",
+}
+
+# SumatraPDF 双面模式 -> -print-settings 参数映射
+SUMATRA_DUPLEX_MAP = {
+    "long": "duplexlong",
+    "short": "duplexshort",
+    "none": "simplex",
+}
+
 # 回调事件类型:
 #   "info"          - 一般信息 {message}
+#   "engine"        - 引擎选择结果 {engine, engine_name, engine_path}
 #   "split_start"   - 开始拆分 {total_pages, sheets}
 #   "split_done"    - 拆分完成 {sheets, temp_dir}
 #   "config"        - 打印机配置 {printer, duplex_mode, success}
@@ -281,8 +312,19 @@ def configure_printer_duplex(printer_name: str, duplex_mode: str = "long") -> bo
 
 
 # ============================================================
-# Acrobat Reader 查找
+# 打印引擎查找
 # ============================================================
+
+def _get_app_dir() -> str:
+    """
+    获取应用程序目录（兼容开发环境和 PyInstaller 打包环境）
+    开发环境: 返回脚本所在目录
+    打包环境: 返回 exe 所在目录
+    """
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
 
 def find_acrobat_reader() -> Optional[str]:
     """
@@ -321,6 +363,83 @@ def find_acrobat_reader() -> Optional[str]:
         pass
 
     return None
+
+
+def find_sumatra_pdf() -> Optional[str]:
+    """
+    查找 SumatraPDF 可执行文件路径
+    依次尝试：vendor目录(打包内置) -> 系统PATH -> 常见安装路径 -> 注册表
+    返回: 找到返回完整路径，未找到返回 None
+    """
+    # 1. 检查打包在 vendor 目录中的 SumatraPDF.exe
+    app_dir = _get_app_dir()
+    vendor_path = os.path.join(app_dir, "vendor", "SumatraPDF.exe")
+    if os.path.exists(vendor_path):
+        return vendor_path
+
+    # 2. 检查系统 PATH
+    for exe_name in ("sumatrapdf.exe", "SumatraPDF.exe"):
+        exe_path = shutil.which(exe_name)
+        if exe_path:
+            return exe_path
+
+    # 3. 检查常见安装路径
+    for path in (
+        r"C:\Program Files\SumatraPDF\SumatraPDF.exe",
+        r"C:\Program Files (x86)\SumatraPDF\SumatraPDF.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\SumatraPDF\SumatraPDF.exe"),
+    ):
+        if os.path.exists(path):
+            return path
+
+    # 4. 从注册表查找
+    for reg_path in (
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\SumatraPDF.exe",
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\SumatraPDF.exe",
+    ):
+        try:
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path)
+            exe_path = winreg.QueryValue(key, None)
+            winreg.CloseKey(key)
+            if exe_path and os.path.exists(exe_path):
+                return exe_path
+        except (FileNotFoundError, OSError):
+            continue
+
+    return None
+
+
+def find_print_engine(preferred_engine: str = "auto") -> tuple:
+    """
+    根据首选引擎查找可用的打印引擎
+
+    参数:
+        preferred_engine: "auto"|"sumatra"|"acrobat"|"shell"
+
+    返回: (engine_type, engine_path)
+        engine_type: "sumatra"|"acrobat"|"shell" 或 None(指定引擎未找到)
+        engine_path: 可执行文件路径或 None(shell引擎无路径)
+
+    优先级 (auto模式): SumatraPDF > Acrobat > ShellExecute
+    """
+    if preferred_engine == "shell":
+        return (ENGINE_SHELL, None)
+
+    if preferred_engine in ("auto", "sumatra"):
+        sumatra_path = find_sumatra_pdf()
+        if sumatra_path:
+            return (ENGINE_SUMATRA, sumatra_path)
+
+    if preferred_engine in ("auto", "acrobat"):
+        acrobat_path = find_acrobat_reader()
+        if acrobat_path:
+            return (ENGINE_ACROBAT, acrobat_path)
+
+    if preferred_engine == "auto":
+        return (ENGINE_SHELL, None)
+
+    # 指定了引擎但未找到
+    return (None, None)
 
 
 # ============================================================
@@ -383,48 +502,155 @@ def split_pdf_for_duplex(
 # 打印
 # ============================================================
 
-def print_pdf_advanced(pdf_file: str, printer_name: str = None) -> bool:
+def _print_with_sumatra(
+    pdf_file: str, printer_name: str,
+    sumatra_path: str, duplex_mode: str = "long",
+) -> tuple:
     """
-    使用Acrobat Reader进行高级打印
-    支持自动缩放、双面打印等功能
+    使用 SumatraPDF 打印 PDF（同步）
 
     参数:
-        pdf_file: PDF文件路径
-        printer_name: 打印机名称，None表示使用默认打印机
+        pdf_file: PDF 文件绝对路径
+        printer_name: 打印机名称
+        sumatra_path: SumatraPDF.exe 路径
+        duplex_mode: "long"|"short"|"none"
+
+    返回: (success: bool, error_msg: str)
+
+    特点:
+        - subprocess.run 同步等待，打印完成或超时后返回
+        - 双面模式通过 -print-settings 控制，不需要 DEVMODE
+        - 缩放通过 -print-settings fit 控制（适应页面）
+    """
+    # 构建 -print-settings 参数
+    settings_parts = [
+        "fit",  # 缩放：适应页面
+        SUMATRA_DUPLEX_MAP.get(duplex_mode, "duplexlong"),  # 双面模式
+    ]
+    settings_str = ",".join(settings_parts)
+
+    cmd = [
+        sumatra_path,
+        "-print-to", printer_name,
+        "-print-settings", settings_str,
+        "-silent",  # 静默模式，不显示错误对话框
+        pdf_file,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd, shell=False, capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            return (True, "")
+        error_codes = {
+            2: "文件不存在或格式不支持",
+            3: "文档不允许打印",
+            4: "打印机不存在",
+            5: "打印机驱动/设备失败",
+            6: "打印被策略禁止",
+        }
+        error_msg = error_codes.get(
+            result.returncode, f"SumatraPDF退出码: {result.returncode}"
+        )
+        if result.stderr:
+            error_msg += f" | {result.stderr.strip()}"
+        return (False, error_msg)
+
+    except subprocess.TimeoutExpired:
+        return (False, "SumatraPDF打印超时(60秒)")
+    except Exception as e:
+        return (False, f"SumatraPDF打印异常: {e}")
+
+
+def _print_with_acrobat(
+    pdf_file: str, printer_name: str, acrobat_path: str,
+) -> tuple:
+    """
+    使用 Acrobat Reader 打印 PDF（异步）
+
+    参数:
+        pdf_file: PDF 文件绝对路径
+        printer_name: 打印机名称
+        acrobat_path: Acrobat 可执行文件路径
+
+    返回: (success: bool, error_msg: str)
+
+    特点:
+        - Popen 异步启动，sleep(3) 等待发送
+        - 双面通过 DEVMODE 配置（在 print_with_delay 中处理）
+    """
+    try:
+        subprocess.Popen(
+            [acrobat_path, "/t", pdf_file, printer_name],
+            shell=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(3)  # 等待 Acrobat 启动并发送打印任务
+        return (True, "")
+    except Exception as e:
+        return (False, f"Acrobat打印异常: {e}")
+
+
+def _print_with_shell(pdf_file: str, printer_name: str) -> tuple:
+    """
+    使用 ShellExecute 打印 PDF（系统默认关联程序）
+
+    参数:
+        pdf_file: PDF 文件绝对路径
+        printer_name: 打印机名称
+
+    返回: (success: bool, error_msg: str)
+    """
+    try:
+        win32api.ShellExecute(
+            0, "print", pdf_file, f'/d:"{printer_name}"', ".", 0
+        )
+        time.sleep(2)  # 等待发送
+        return (True, "")
+    except Exception as e:
+        return (False, f"ShellExecute打印异常: {e}")
+
+
+def print_pdf_advanced(
+    pdf_file: str,
+    printer_name: str = None,
+    engine_type: str = None,
+    engine_path: str = None,
+    duplex_mode: str = "long",
+) -> bool:
+    """
+    使用指定的打印引擎打印 PDF
+
+    参数:
+        pdf_file: PDF 文件路径
+        printer_name: 打印机名称，None 表示使用默认打印机
+        engine_type: 引擎类型 "sumatra"|"acrobat"|"shell"
+                     （由 print_with_delay 解析后传入）
+        engine_path: 引擎可执行文件路径（shell 引擎为 None）
+        duplex_mode: 双面模式（SumatraPDF 引擎使用）
 
     返回: 是否成功发送打印命令
     """
-    try:
-        if printer_name is None:
-            printer_name = get_default_printer()
+    if printer_name is None:
+        printer_name = get_default_printer()
 
-        abs_path = os.path.abspath(pdf_file)
-        acrobat_path = find_acrobat_reader()
+    abs_path = os.path.abspath(pdf_file)
 
-        if acrobat_path:
-            try:
-                subprocess.Popen(
-                    [acrobat_path, "/t", abs_path, printer_name],
-                    shell=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                time.sleep(3)
-            except Exception:
-                # 降级到ShellExecute方法
-                win32api.ShellExecute(
-                    0, "print", abs_path, f'/d:"{printer_name}"', ".", 0
-                )
-        else:
-            # 未找到Adobe Reader，使用系统默认打印
-            win32api.ShellExecute(
-                0, "print", abs_path, f'/d:"{printer_name}"', ".", 0
-            )
+    # 引擎未指定时降级到 shell
+    if engine_type is None:
+        engine_type = ENGINE_SHELL
 
-        return True
-
-    except Exception:
-        return False
+    if engine_type == ENGINE_SUMATRA and engine_path:
+        success, _ = _print_with_sumatra(abs_path, printer_name, engine_path, duplex_mode)
+        return success
+    elif engine_type == ENGINE_ACROBAT and engine_path:
+        success, _ = _print_with_acrobat(abs_path, printer_name, engine_path)
+        return success
+    else:
+        success, _ = _print_with_shell(abs_path, printer_name)
+        return success
 
 
 # ============================================================
@@ -438,6 +664,7 @@ def print_with_delay(
     keep_temp: bool = False,
     configure_duplex: bool = True,
     duplex_mode: str = "long",
+    engine: str = "auto",
     progress_callback: ProgressCallback = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> dict:
@@ -446,15 +673,20 @@ def print_with_delay(
 
     参数:
         pdf_file: 输入PDF文件路径
-        delay_seconds: 每次打印后的等待时间（秒）
+        delay_seconds: 每次打印后的等待时间（秒），仅双面模式生效
         printer_name: 打印机名称（None表示使用默认打印机）
         keep_temp: 是否保留临时文件
         configure_duplex: 是否自动配置双面打印
         duplex_mode: "long"=长边翻转, "short"=短边翻转, "none"=单面
+        engine: 打印引擎 "auto"|"sumatra"|"acrobat"|"shell"
         progress_callback: 进度回调函数
-        cancel_event: 取消事件（ threading.Event）
+        cancel_event: 取消事件（threading.Event）
 
     返回: {"success_count": int, "total_sheets": int, "cancelled": bool}
+
+    说明:
+        - 双面模式(long/short): PDF按2页拆分，每批打印后延迟等待打印机机械复位
+        - 单面模式(none): 不拆分PDF，直接打印整个文件，无延迟
     """
     def _cb(event_type: str, data: dict = None):
         if progress_callback:
@@ -476,8 +708,22 @@ def print_with_delay(
     else:
         _cb("info", {"message": f"使用打印机: {printer_name}"})
 
+    # 解析打印引擎（只解析一次）
+    engine_type, engine_path = find_print_engine(engine)
+    if engine_type is None:
+        _cb("error", {"message": f"指定的打印引擎不可用: {engine}"})
+        _cb("done", {"success_count": 0, "total_sheets": 0, "cancelled": False})
+        return result
+
+    _cb("engine", {
+        "engine": engine_type,
+        "engine_name": ENGINE_NAMES.get(engine_type, engine_type),
+        "engine_path": engine_path or "N/A",
+    })
+
     # 配置双面打印
-    if configure_duplex:
+    # SumatraPDF 引擎通过 -print-settings 控制双面，不需要 DEVMODE 配置
+    if configure_duplex and engine_type != ENGINE_SUMATRA:
         _cb("info", {"message": "配置打印机双面打印设置..."})
         success = configure_printer_duplex(printer_name, duplex_mode)
         _cb("config", {
@@ -485,6 +731,16 @@ def print_with_delay(
             "duplex_mode": duplex_mode,
             "success": success,
         })
+    elif engine_type == ENGINE_SUMATRA:
+        _cb("info", {"message": "SumatraPDF引擎，双面通过-print-settings控制，跳过DEVMODE配置"})
+        _cb("config", {
+            "printer": printer_name,
+            "duplex_mode": duplex_mode,
+            "success": True,
+        })
+
+    # 判断是否为双面打印模式（单面模式无需拆分和延迟）
+    is_duplex = duplex_mode != "none"
 
     # 使用系统临时目录创建临时子目录
     temp_dir = tempfile.mkdtemp(prefix="pdf_duplex_")
@@ -496,8 +752,18 @@ def print_with_delay(
             result["cancelled"] = True
             return result
 
-        # 分割PDF
-        temp_files = split_pdf_for_duplex(pdf_file, temp_dir, progress_callback)
+        if is_duplex:
+            # 双面模式：按2页一批拆分PDF，每批打印后延迟等待打印机机械复位
+            temp_files = split_pdf_for_duplex(pdf_file, temp_dir, progress_callback)
+        else:
+            # 单面模式：无需拆分，直接打印整个PDF文件
+            reader = PdfReader(pdf_file)
+            total_pages = len(reader.pages)
+            temp_files = [pdf_file]  # 直接使用原文件
+            _cb("split_start", {"total_pages": total_pages, "sheets": 1, "is_duplex": False})
+            _cb("info", {"message": f"单面打印模式，无需拆分PDF，共 {total_pages} 页直接打印"})
+            _cb("split_done", {"sheets": 1, "temp_dir": "N/A (未拆分)"})
+
         total_sheets = len(temp_files)
         result["total_sheets"] = total_sheets
 
@@ -505,7 +771,10 @@ def print_with_delay(
             _cb("error", {"message": "PDF没有页面可打印"})
             return result
 
-        _cb("info", {"message": f"开始打印，共 {total_sheets} 批次..."})
+        if is_duplex:
+            _cb("info", {"message": f"开始打印，共 {total_sheets} 批次（每批2页）..."})
+        else:
+            _cb("info", {"message": f"开始打印，共 {total_sheets} 个文件..."})
 
         # 逐批打印
         for idx, temp_file in enumerate(temp_files, 1):
@@ -521,7 +790,12 @@ def print_with_delay(
                 "filename": os.path.basename(temp_file),
             })
 
-            success = print_pdf_advanced(temp_file, printer_name)
+            success = print_pdf_advanced(
+                temp_file, printer_name,
+                engine_type=engine_type,
+                engine_path=engine_path,
+                duplex_mode=duplex_mode,
+            )
 
             if success:
                 result["success_count"] += 1
@@ -536,8 +810,9 @@ def print_with_delay(
                     "error": "打印命令发送失败",
                 })
 
-            # 延迟等待（逐秒倒计时，支持取消）
-            if idx < total_sheets or True:  # 每批都等待，确保Reader读取文件
+            # 延迟等待：仅双面模式需要，且不是最后一批
+            # 单面模式无卡纸风险，直接跳过延迟
+            if is_duplex and idx < total_sheets:
                 for remaining in range(delay_seconds, 0, -1):
                     if _is_cancelled():
                         result["cancelled"] = True
@@ -552,8 +827,9 @@ def print_with_delay(
                     _cb("info", {"message": "用户已取消打印"})
                     break
 
-        # 额外等待确保最后一个文件被Reader完全读取
-        if not _is_cancelled():
+        # 双面模式额外等待确保最后一个文件被Reader完全读取
+        # 单面模式无需此等待（SumatraPDF同步返回，单面无机械复位需求）
+        if is_duplex and not _is_cancelled() and engine_type != ENGINE_SUMATRA:
             _cb("info", {"message": "等待最后的打印作业完成..."})
             time.sleep(5)
 
@@ -585,9 +861,19 @@ def default_cli_callback(event_type: str, data: dict) -> None:
     if event_type == "info":
         print(data.get("message", ""))
 
+    elif event_type == "engine":
+        engine_name = data.get("engine_name", "")
+        engine_path = data.get("engine_path", "")
+        print(f"  打印引擎: {engine_name}")
+        if engine_path and engine_path != "N/A":
+            print(f"  引擎路径: {engine_path}")
+
     elif event_type == "split_start":
         print(f"PDF总页数: {data['total_pages']}")
-        print(f"需要打印 {data['sheets']} 张纸（双面）")
+        if data.get("is_duplex", True):
+            print(f"需要打印 {data['sheets']} 张纸（双面）")
+        else:
+            print(f"单面打印，共 {data['total_pages']} 页")
 
     elif event_type == "split_done":
         print(f"PDF拆分完成，共 {data['sheets']} 个临时文件")

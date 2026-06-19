@@ -4,12 +4,17 @@
 PDF双面打印延迟控制脚本 - CLI 入口
 解决Brother MFC-7480D等打印机连续双面打印卡纸问题
 
+延迟说明:
+  - 双面模式(long/short): PDF按2页拆分，每批打印后延迟等待打印机机械复位
+  - 单面模式(none): 不拆分PDF，直接打印整个文件，无延迟
+
 用法示例:
-  python cli_app.py document.pdf                    使用默认打印机，15秒延迟
+  python cli_app.py document.pdf                    使用默认打印机，15秒延迟（双面）
   python cli_app.py document.pdf -d 20              20秒延迟
   python cli_app.py document.pdf -p Brother         模糊匹配打印机
   python cli_app.py document.pdf -p 1               按编号选择打印机
   python cli_app.py document.pdf --duplex short     短边翻转双面
+  python cli_app.py document.pdf --duplex none      单面打印（无需延迟）
   python cli_app.py -l                              列出打印机
   python cli_app.py -i -p Brother                   查看指定打印机信息
 """
@@ -79,11 +84,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  %(prog)s document.pdf                    使用默认打印机，15秒延迟
+  %(prog)s document.pdf                    使用默认打印机，15秒延迟（双面）
   %(prog)s document.pdf -d 20              20秒延迟
   %(prog)s document.pdf -p Brother         模糊匹配打印机
   %(prog)s document.pdf -p 1               按编号选择打印机
   %(prog)s document.pdf --duplex short     短边翻转双面
+  %(prog)s document.pdf --duplex none      单面打印（无需延迟，直接打印整个文件）
   %(prog)s -l                              列出打印机
   %(prog)s -i -p Brother                   查看指定打印机信息
         """,
@@ -95,7 +101,7 @@ def main():
     )
     parser.add_argument(
         "-d", "--delay", type=int, default=15, metavar="N",
-        help="每批打印后的延迟秒数（默认: 15）"
+        help="每批打印后的延迟秒数（默认: 15），仅双面模式生效，单面模式自动跳过"
     )
     parser.add_argument(
         "-p", "--printer", metavar="NAME",
@@ -120,6 +126,11 @@ def main():
     parser.add_argument(
         "--no-config", action="store_true",
         help="跳过自动双面打印配置"
+    )
+    parser.add_argument(
+        "-e", "--engine",
+        choices=["auto", "sumatra", "acrobat", "shell"], default="auto",
+        help="打印引擎: auto=自动选择(默认), sumatra=SumatraPDF, acrobat=Acrobat Reader, shell=系统默认"
     )
 
     args = parser.parse_args()
@@ -186,9 +197,15 @@ def main():
     print("=" * 60)
     print(f"  PDF文件:   {args.pdf_file}")
     print(f"  打印机:     {printer_name}")
-    print(f"  延迟间隔:   {args.delay}秒")
+    # 单面模式无需延迟
+    if args.duplex == "none":
+        print(f"  延迟间隔:   无需 (单面打印)")
+    else:
+        print(f"  延迟间隔:   {args.delay}秒")
     mode_names = {"long": "长边翻转", "short": "短边翻转", "none": "单面"}
     print(f"  双面模式:   {mode_names[args.duplex]}")
+    engine_names = {"auto": "自动选择", "sumatra": "SumatraPDF", "acrobat": "Acrobat Reader", "shell": "系统默认"}
+    print(f"  打印引擎:   {engine_names[args.engine]}")
     print("=" * 60 + "\n")
 
     # 执行打印
@@ -200,6 +217,7 @@ def main():
             keep_temp=args.keep_temp,
             configure_duplex=not args.no_config,
             duplex_mode=args.duplex,
+            engine=args.engine,
             progress_callback=default_cli_callback,
         )
 

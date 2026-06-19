@@ -11,6 +11,7 @@ PDF双面打印延迟控制脚本 - PyInstaller 打包配置
     ├── pdf_duplex_printer_cli.exe   (命令行版)
     ├── pdf_duplex_printer_gui.exe   (图形界面版)
     ├── internal/                     (依赖文件)
+    ├── vendor/                       (SumatraPDF便携版)
     ├── README.md
     └── requirements.txt
 """
@@ -25,6 +26,10 @@ from PyInstaller.utils.hooks import collect_all
 # ============================================================
 # 依赖收集
 # ============================================================
+
+binaries = []
+datas = []
+hiddenimports = []
 
 binaries = []
 datas = []
@@ -197,3 +202,11 @@ for file in extra_files:
     dest_file = join(dest_root, file)
     makedirs(dirname(dest_file), exist_ok=True)
     copyfile(file, dest_file)
+
+# 复制 SumatraPDF 便携版到 vendor 目录
+vendor_src = join(SPECPATH, "vendor", "SumatraPDF.exe")
+if exists(vendor_src):
+    vendor_dest = join(dest_root, "vendor", "SumatraPDF.exe")
+    makedirs(dirname(vendor_dest), exist_ok=True)
+    copyfile(vendor_src, vendor_dest)
+    print(f"Copied SumatraPDF to {vendor_dest}")

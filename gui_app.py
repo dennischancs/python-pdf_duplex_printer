@@ -28,6 +28,85 @@ from pdf_duplex_printer import (
 )
 
 
+class Tooltip:
+    """
+    Tkinter 控件悬停提示（纯 tkinter 实现，无外部依赖）
+    鼠标悬停 500ms 后显示提示，离开或点击时隐藏
+    """
+
+    def __init__(self, widget, text: str, delay: int = 500):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.tooltip_window = None
+        self.after_id = None
+
+        widget.bind("<Enter>", self._on_enter)
+        widget.bind("<Leave>", self._on_leave)
+        widget.bind("<Button-1>", self._on_leave)
+
+    def _on_enter(self, event=None):
+        """鼠标进入，安排延迟显示"""
+        self._cancel()
+        self.after_id = self.widget.after(self.delay, self._show)
+
+    def _on_leave(self, event=None):
+        """鼠标离开或点击，隐藏提示"""
+        self._cancel()
+        self._hide()
+
+    def _cancel(self):
+        """取消延迟显示"""
+        if self.after_id:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+
+    def _show(self):
+        """显示提示窗口"""
+        if self.tooltip_window or not self.text:
+            return
+
+        self.tooltip_window = tk.Toplevel(self.widget)
+        self.tooltip_window.wm_overrideredirect(True)  # 无边框
+        self.tooltip_window.wm_attributes("-topmost", True)  # 置顶
+
+        label = tk.Label(
+            self.tooltip_window,
+            text=self.text,
+            justify=tk.LEFT,
+            background="#FFFFE0",  # 浅黄色背景
+            foreground="#333333",
+            relief=tk.SOLID,
+            borderwidth=1,
+            font=("Microsoft YaHei", 9),
+            padx=6,
+            pady=3,
+        )
+        label.pack()
+
+        # 定位：鼠标位置右下方
+        x = self.widget.winfo_pointerx() + 15
+        y = self.widget.winfo_pointery() + 10
+
+        # 屏幕边缘修正
+        screen_w = self.widget.winfo_screenwidth()
+        screen_h = self.widget.winfo_screenheight()
+        win_w = self.tooltip_window.winfo_reqwidth()
+        win_h = self.tooltip_window.winfo_reqheight()
+        if x + win_w > screen_w:
+            x = screen_w - win_w - 5
+        if y + win_h > screen_h:
+            y = self.widget.winfo_pointery() - win_h - 10
+
+        self.tooltip_window.wm_geometry(f"+{x}+{y}")
+
+    def _hide(self):
+        """隐藏提示窗口"""
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
+
+
 class DuplexPrinterGUI:
     """PDF双面打印延迟控制 GUI 主类"""
 
@@ -45,6 +124,11 @@ class DuplexPrinterGUI:
 
         # 构建 UI
         self._build_ui()
+
+        # 绑定双面模式切换事件（联动延迟控件状态）
+        self.duplex_var.trace_add("write", self._on_duplex_change)
+        # 初始化延迟控件状态
+        self._on_duplex_change()
 
         # 加载打印机列表
         self._load_printers()
@@ -72,9 +156,11 @@ class DuplexPrinterGUI:
         self.pdf_path = tk.StringVar()
         pdf_entry = ttk.Entry(file_frame, textvariable=self.pdf_path, state="readonly")
         pdf_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        Tooltip(pdf_entry, "显示已选择的PDF文件路径\n点击右侧「浏览...」按钮选择文件")
 
         browse_btn = ttk.Button(file_frame, text="浏览...", command=self.on_browse)
         browse_btn.grid(row=0, column=1)
+        Tooltip(browse_btn, "点击打开文件选择对话框，选择要打印的PDF文件")
 
         # --- 打印机选择 ---
         printer_frame = ttk.LabelFrame(main_frame, text="打印机", padding="8")
@@ -86,13 +172,16 @@ class DuplexPrinterGUI:
             printer_frame, textvariable=self.printer_var, state="readonly"
         )
         self.printer_combo.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        Tooltip(self.printer_combo, "选择目标打印机\n点击「刷新」按钮可重新获取打印机列表")
 
         refresh_btn = ttk.Button(printer_frame, text="刷新", command=self._load_printers)
         refresh_btn.grid(row=0, column=1)
+        Tooltip(refresh_btn, "重新扫描系统中的可用打印机")
 
         # 打印机信息按钮
         info_btn = ttk.Button(printer_frame, text="查看信息", command=self.on_show_info)
         info_btn.grid(row=0, column=2, padx=(4, 0))
+        Tooltip(info_btn, "查看选中打印机的当前配置\n（双面模式、纸张大小、方向）")
 
         # --- 参数设置 ---
         settings_frame = ttk.LabelFrame(main_frame, text="打印设置", padding="8")
@@ -100,14 +189,21 @@ class DuplexPrinterGUI:
         settings_frame.columnconfigure(1, weight=1)
 
         # 延迟秒数
-        ttk.Label(settings_frame, text="延迟间隔（秒）:").grid(
+        self.delay_label = ttk.Label(settings_frame, text="延迟间隔（秒）:")
+        self.delay_label.grid(
             row=0, column=0, sticky="w", padx=(0, 8)
         )
         self.delay_var = tk.IntVar(value=15)
-        delay_spin = ttk.Spinbox(
+        self.delay_spin = ttk.Spinbox(
             settings_frame, from_=1, to=120, textvariable=self.delay_var, width=8
         )
-        delay_spin.grid(row=0, column=1, sticky="w")
+        self.delay_spin.grid(row=0, column=1, sticky="w")
+        self.delay_tooltip = Tooltip(self.delay_spin, "每批打印后的等待秒数，让打印机机械结构复位\n"
+                            "避免连续双面打印卡纸\n"
+                            "Brother MFC-7480D 建议 15-20 秒")
+        # 延迟提示文字（单面模式下显示）
+        self.delay_hint = ttk.Label(settings_frame, text="", foreground="#888888")
+        self.delay_hint.grid(row=0, column=2, sticky="w", padx=(8, 0))
 
         # 双面模式
         ttk.Label(settings_frame, text="双面模式:").grid(
@@ -117,29 +213,60 @@ class DuplexPrinterGUI:
         duplex_frame.grid(row=1, column=1, sticky="w", pady=(8, 0))
 
         self.duplex_var = tk.StringVar(value="long")
-        ttk.Radiobutton(
+        self.duplex_long_rb = ttk.Radiobutton(
             duplex_frame, text="长边翻转", variable=self.duplex_var, value="long"
-        ).grid(row=0, column=0, padx=(0, 12))
-        ttk.Radiobutton(
+        )
+        self.duplex_long_rb.grid(row=0, column=0, padx=(0, 12))
+        Tooltip(self.duplex_long_rb, "长边翻转（书本式）\n沿长边翻页，适合竖向文档")
+
+        self.duplex_short_rb = ttk.Radiobutton(
             duplex_frame, text="短边翻转", variable=self.duplex_var, value="short"
-        ).grid(row=0, column=1, padx=(0, 12))
-        ttk.Radiobutton(
+        )
+        self.duplex_short_rb.grid(row=0, column=1, padx=(0, 12))
+        Tooltip(self.duplex_short_rb, "短边翻转（记事本式）\n沿短边翻页，适合横向文档")
+
+        self.duplex_none_rb = ttk.Radiobutton(
             duplex_frame, text="单面", variable=self.duplex_var, value="none"
-        ).grid(row=0, column=2)
+        )
+        self.duplex_none_rb.grid(row=0, column=2)
+        Tooltip(self.duplex_none_rb, "单面打印\n不使用双面功能，只打印一面\n"
+                                      "选择此项时延迟间隔将自动禁用（单面无需延迟）")
+
+        # 打印引擎
+        ttk.Label(settings_frame, text="打印引擎:").grid(
+            row=2, column=0, sticky="w", padx=(0, 8), pady=(8, 0)
+        )
+        self.engine_var = tk.StringVar(value="auto")
+        engine_combo = ttk.Combobox(
+            settings_frame, textvariable=self.engine_var,
+            values=["auto", "sumatra", "acrobat", "shell"],
+            state="readonly", width=15,
+        )
+        engine_combo.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        Tooltip(engine_combo, "打印引擎选择：\n"
+                              "auto - 自动选择（推荐，优先SumatraPDF）\n"
+                              "sumatra - 强制使用 SumatraPDF\n"
+                              "acrobat - 强制使用 Acrobat Reader\n"
+                              "shell - 系统默认程序（降级方案）")
 
         # 选项
         options_frame = ttk.Frame(settings_frame)
-        options_frame.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        options_frame.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         self.keep_temp_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.keep_temp_cb = ttk.Checkbutton(
             options_frame, text="保留临时文件（调试）", variable=self.keep_temp_var
-        ).grid(row=0, column=0, padx=(0, 16))
+        )
+        self.keep_temp_cb.grid(row=0, column=0, padx=(0, 16))
+        Tooltip(self.keep_temp_cb, "保留拆分后的临时PDF文件\n用于调试和排查问题，普通使用无需勾选")
 
         self.no_config_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.no_config_cb = ttk.Checkbutton(
             options_frame, text="跳过双面配置", variable=self.no_config_var
-        ).grid(row=0, column=1)
+        )
+        self.no_config_cb.grid(row=0, column=1)
+        Tooltip(self.no_config_cb, "跳过自动DEVMODE双面配置，使用打印机当前设置\n"
+                                   "SumatraPDF引擎下此选项无效（双面通过打印参数控制）")
 
         # --- 操作按钮 ---
         btn_frame = ttk.Frame(main_frame)
@@ -147,11 +274,13 @@ class DuplexPrinterGUI:
 
         self.print_btn = ttk.Button(btn_frame, text="开始打印", command=self.on_print)
         self.print_btn.grid(row=0, column=0, padx=(0, 8))
+        Tooltip(self.print_btn, "开始分批打印PDF文件")
 
         self.cancel_btn = ttk.Button(
             btn_frame, text="取消打印", command=self.on_cancel, state="disabled"
         )
         self.cancel_btn.grid(row=0, column=1, padx=(0, 8))
+        Tooltip(self.cancel_btn, "取消当前正在执行的打印任务\n已发送的打印作业仍会完成")
 
         # --- 进度条 ---
         progress_frame = ttk.Frame(main_frame)
@@ -203,6 +332,33 @@ class DuplexPrinterGUI:
     # ============================================================
     # 事件处理
     # ============================================================
+
+    def _on_duplex_change(self, *args):
+        """双面模式切换时联动延迟控件状态
+
+        单面模式: 禁用延迟Spinbox，显示"单面无需延迟"提示
+        双面模式: 启用延迟Spinbox，恢复正常提示
+        """
+        is_simplex = self.duplex_var.get() == "none"
+
+        if is_simplex:
+            self.delay_spin.config(state="disabled")
+            self.delay_label.config(foreground="#999999")
+            self.delay_hint.config(text="单面无需延迟")
+            self.delay_tooltip.text = (
+                "单面打印模式下无需设置延迟\n"
+                "延迟仅用于双面打印时防止打印机机械结构卡纸\n"
+                "切换到双面模式后将自动恢复此设置"
+            )
+        else:
+            self.delay_spin.config(state="normal")
+            self.delay_label.config(foreground="#000000")
+            self.delay_hint.config(text="")
+            self.delay_tooltip.text = (
+                "每批打印后的等待秒数，让打印机机械结构复位\n"
+                "避免连续双面打印卡纸\n"
+                "Brother MFC-7480D 建议 15-20 秒"
+            )
 
     def on_browse(self):
         """浏览选择PDF文件"""
@@ -259,12 +415,17 @@ class DuplexPrinterGUI:
 
         # 确认开始
         mode_names = {"long": "长边翻转", "short": "短边翻转", "none": "单面"}
+        engine_names = {"auto": "自动选择", "sumatra": "SumatraPDF",
+                        "acrobat": "Acrobat Reader", "shell": "系统默认"}
+        duplex_mode = self.duplex_var.get()
+        delay_display = "无需 (单面打印)" if duplex_mode == "none" else f"{delay}秒"
         confirm = messagebox.askyesno(
             "确认打印",
             f"PDF文件: {os.path.basename(pdf_file)}\n"
             f"打印机: {printer_name}\n"
-            f"延迟间隔: {delay}秒\n"
-            f"双面模式: {mode_names[self.duplex_var.get()]}\n\n"
+            f"延迟间隔: {delay_display}\n"
+            f"双面模式: {mode_names[duplex_mode]}\n"
+            f"打印引擎: {engine_names.get(self.engine_var.get(), self.engine_var.get())}\n\n"
             f"确认开始打印？"
         )
         if not confirm:
@@ -311,6 +472,7 @@ class DuplexPrinterGUI:
                 keep_temp=self.keep_temp_var.get(),
                 configure_duplex=not self.no_config_var.get(),
                 duplex_mode=self.duplex_var.get(),
+                engine=self.engine_var.get(),
                 progress_callback=progress_callback,
                 cancel_event=self.cancel_event,
             )
@@ -340,10 +502,20 @@ class DuplexPrinterGUI:
         if event_type == "info":
             self._log(data.get("message", ""))
 
+        elif event_type == "engine":
+            engine_name = data.get("engine_name", "")
+            engine_path = data.get("engine_path", "")
+            self._log(f"使用打印引擎: {engine_name}")
+            if engine_path and engine_path != "N/A":
+                self._log(f"  引擎路径: {engine_path}")
+
         elif event_type == "split_start":
             self.total_sheets = data["sheets"]
             self._log(f"PDF总页数: {data['total_pages']}")
-            self._log(f"需要打印 {data['sheets']} 张纸（双面）")
+            if data.get("is_duplex", True):
+                self._log(f"需要打印 {data['sheets']} 张纸（双面）")
+            else:
+                self._log(f"单面打印，共 {data['total_pages']} 页直接打印")
             self.progress_bar["maximum"] = data["sheets"]
             self.progress_label.config(text=f"0/{data['sheets']}")
 
