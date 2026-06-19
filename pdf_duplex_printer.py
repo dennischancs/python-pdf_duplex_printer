@@ -101,13 +101,16 @@ SUMATRA_DUPLEX_MAP = {
 # 回调事件类型:
 #   "info"          - 一般信息 {message}
 #   "engine"        - 引擎选择结果 {engine, engine_name, engine_path}
-#   "split_start"   - 开始拆分 {total_pages, sheets}
+#   "copy_start"    - 开始打印新一份 {copy_index, total_copies}
+#   "split_start"   - 开始拆分 {total_pages, sheets} (is_duplex: bool)
 #   "split_done"    - 拆分完成 {sheets, temp_dir}
 #   "config"        - 打印机配置 {printer, duplex_mode, success}
 #   "batch_start"   - 批次开始 {index, total, filename}
 #   "batch_done"    - 批次完成 {index, total}
 #   "batch_fail"    - 批次失败 {index, total, error}
 #   "delay"         - 延迟倒计时 {remaining, total}
+#   "file_start"    - 开始处理某个文件（多文件模式）{index, total, filepath}
+#   "file_done"     - 某个文件处理完成 {index, total, success_count, total_sheets}
 #   "cleanup"       - 清理临时文件 {temp_dir, kept}
 #   "done"          - 全部完成 {success_count, total_sheets, cancelled}
 #   "error"         - 错误 {message}
@@ -499,6 +502,127 @@ def split_pdf_for_duplex(
 
 
 # ============================================================
+# 页面范围与文件发现
+# ============================================================
+
+def parse_page_range(page_range_str: str, total_pages: int) -> list:
+    """
+    解析页面范围字符串，返回0-based页面索引列表
+
+    支持的格式:
+      - "all": 全部页面
+      - "odd": 奇数页（1, 3, 5, ...）
+      - "even": 偶数页（2, 4, 6, ...）
+      - "1-5,8,10-12": 自定义范围（1-based输入）
+
+    参数:
+        page_range_str: 页面范围字符串
+        total_pages: PDF总页数（用于边界检查）
+
+    返回: 排序去重后的0-based页面索引列表
+          空列表表示无匹配页面
+    """
+    if page_range_str == "all":
+        return list(range(total_pages))
+
+    if page_range_str == "odd":
+        return [i for i in range(total_pages) if i % 2 == 0]  # 0-based: 0,2,4 → 1,3,5
+
+    if page_range_str == "even":
+        return [i for i in range(total_pages) if i % 2 == 1]  # 0-based: 1,3,5 → 2,4,6
+
+    # 自定义范围解析（如 "1-5,8,10-12"）
+    pages = set()
+    for part in page_range_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            try:
+                start, end = part.split("-", 1)
+                start_idx = int(start.strip()) - 1   # 转为0-based
+                end_idx = int(end.strip())            # 末尾包含，不-1
+                if start_idx < 0:
+                    start_idx = 0
+                for idx in range(start_idx, min(end_idx, total_pages)):
+                    pages.add(idx)
+            except ValueError:
+                continue  # 忽略格式错误的部分
+        else:
+            try:
+                page_idx = int(part) - 1  # 转为0-based
+                if 0 <= page_idx < total_pages:
+                    pages.add(page_idx)
+            except ValueError:
+                continue  # 忽略格式错误的部分
+
+    return sorted(pages)
+
+
+def filter_pdf_pages(
+    input_pdf: str,
+    page_range: str,
+    output_pdf: str,
+) -> str:
+    """
+    根据页面范围过滤PDF页面，生成新的PDF文件
+
+    参数:
+        input_pdf: 输入PDF文件路径
+        page_range: 页面范围字符串（传给 parse_page_range）
+        output_pdf: 输出PDF文件路径
+
+    返回: 实际使用的PDF路径
+           - 如果 page_range=="all"，直接返回 input_pdf（不生成新文件）
+           - 否则返回 output_pdf（已写入过滤后的页面）
+    """
+    if page_range == "all":
+        return input_pdf
+
+    reader = PdfReader(input_pdf)
+    total_pages = len(reader.pages)
+    indices = parse_page_range(page_range, total_pages)
+
+    if not indices:
+        return input_pdf  # 无匹配页面，返回原文件（调用方会报"没有页面可打印"）
+
+    writer = PdfWriter()
+    for idx in indices:
+        writer.add_page(reader.pages[idx])
+
+    with open(output_pdf, "wb") as f:
+        writer.write(f)
+
+    return output_pdf
+
+
+def discover_pdf_files(input_path: str) -> list:
+    """
+    根据输入路径发现PDF文件
+
+    参数:
+        input_path: 文件路径或文件夹路径
+
+    返回: PDF文件绝对路径列表（按名称排序）
+           - 文件: 返回 [abs_path]
+           - 文件夹: 递归扫描所有 *.pdf
+           - 无结果: 返回 []
+    """
+    abs_path = os.path.abspath(input_path)
+
+    if os.path.isfile(abs_path):
+        return [abs_path]
+
+    if os.path.isdir(abs_path):
+        import glob
+        pattern = os.path.join(abs_path, "**", "*.pdf")
+        files = glob.glob(pattern, recursive=True)
+        return sorted(files)
+
+    return []
+
+
+# ============================================================
 # 打印
 # ============================================================
 
@@ -659,7 +783,7 @@ def print_pdf_advanced(
 
 def print_with_delay(
     pdf_file: str,
-    delay_seconds: int = 15,
+    delay_seconds: int = 20,  # 每次打印后的等待时间（秒），仅双面模式生效
     printer_name: Optional[str] = None,
     keep_temp: bool = False,
     configure_duplex: bool = True,
@@ -667,6 +791,8 @@ def print_with_delay(
     engine: str = "auto",
     progress_callback: ProgressCallback = None,
     cancel_event: Optional[threading.Event] = None,
+    copies: int = 1,             # 打印份数（逐份打印）
+    page_range: str = "all",     # 页面范围: all/odd/even/"1-5,8"
 ) -> dict:
     """
     主函数：分批打印PDF，每次打印后等待指定时间
@@ -681,12 +807,16 @@ def print_with_delay(
         engine: 打印引擎 "auto"|"sumatra"|"acrobat"|"shell"
         progress_callback: 进度回调函数
         cancel_event: 取消事件（threading.Event）
+        copies: 打印份数（默认1，逐份打印）
+        page_range: 页面范围 "all"|"odd"|"even"|"1-5,8,10-12"
 
     返回: {"success_count": int, "total_sheets": int, "cancelled": bool}
 
     说明:
         - 双面模式(long/short): PDF按2页拆分，每批打印后延迟等待打印机机械复位
         - 单面模式(none): 不拆分PDF，直接打印整个文件，无延迟
+        - 份数>1时，逐份打印（完成完整一份后再打下一份）
+        - 页面范围非"all"时，在拆分前先过滤页面
     """
     def _cb(event_type: str, data: dict = None):
         if progress_callback:
@@ -752,14 +882,23 @@ def print_with_delay(
             result["cancelled"] = True
             return result
 
+        # 页面范围过滤（在拆分之前）
+        actual_pdf = pdf_file
+        if page_range != "all":
+            filtered_pdf = os.path.join(temp_dir, "filtered.pdf")
+            actual_pdf = filter_pdf_pages(pdf_file, page_range, filtered_pdf)
+            if actual_pdf == filtered_pdf:
+                _cb("info", {"message": f"页面范围: {page_range}，已过滤页面"})
+            # 如果返回原文件说明无匹配或page_range==all，继续使用原文件
+
         if is_duplex:
             # 双面模式：按2页一批拆分PDF，每批打印后延迟等待打印机机械复位
-            temp_files = split_pdf_for_duplex(pdf_file, temp_dir, progress_callback)
+            temp_files = split_pdf_for_duplex(actual_pdf, temp_dir, progress_callback)
         else:
             # 单面模式：无需拆分，直接打印整个PDF文件
-            reader = PdfReader(pdf_file)
+            reader = PdfReader(actual_pdf)
             total_pages = len(reader.pages)
-            temp_files = [pdf_file]  # 直接使用原文件
+            temp_files = [actual_pdf]  # 直接使用(过滤后的)文件
             _cb("split_start", {"total_pages": total_pages, "sheets": 1, "is_duplex": False})
             _cb("info", {"message": f"单面打印模式，无需拆分PDF，共 {total_pages} 页直接打印"})
             _cb("split_done", {"sheets": 1, "temp_dir": "N/A (未拆分)"})
@@ -776,56 +915,74 @@ def print_with_delay(
         else:
             _cb("info", {"message": f"开始打印，共 {total_sheets} 个文件..."})
 
-        # 逐批打印
-        for idx, temp_file in enumerate(temp_files, 1):
-            # 检查取消
+        # 份数外层循环（逐份打印：先打完一份的所有批次，再打下一份）
+        for copy_idx in range(copies):
             if _is_cancelled():
                 result["cancelled"] = True
-                _cb("info", {"message": "用户已取消打印"})
                 break
 
-            _cb("batch_start", {
-                "index": idx,
-                "total": total_sheets,
-                "filename": os.path.basename(temp_file),
-            })
-
-            success = print_pdf_advanced(
-                temp_file, printer_name,
-                engine_type=engine_type,
-                engine_path=engine_path,
-                duplex_mode=duplex_mode,
-            )
-
-            if success:
-                result["success_count"] += 1
-                _cb("batch_done", {
-                    "index": idx,
-                    "total": total_sheets,
+            if copies > 1:
+                _cb("copy_start", {
+                    "copy_index": copy_idx + 1,
+                    "total_copies": copies,
                 })
-            else:
-                _cb("batch_fail", {
-                    "index": idx,
-                    "total": total_sheets,
-                    "error": "打印命令发送失败",
-                })
+                _cb("info", {"message": f"--- 第 {copy_idx + 1}/{copies} 份 ---"})
 
-            # 延迟等待：仅双面模式需要，且不是最后一批
-            # 单面模式无卡纸风险，直接跳过延迟
-            if is_duplex and idx < total_sheets:
-                for remaining in range(delay_seconds, 0, -1):
-                    if _is_cancelled():
-                        result["cancelled"] = True
-                        break
-                    _cb("delay", {
-                        "remaining": remaining,
-                        "total": delay_seconds,
-                    })
-                    time.sleep(1)
-
+            # 逐批打印（内层循环）
+            for idx, temp_file in enumerate(temp_files, 1):
+                # 检查取消
                 if _is_cancelled():
+                    result["cancelled"] = True
                     _cb("info", {"message": "用户已取消打印"})
                     break
+
+                _cb("batch_start", {
+                    "index": idx,
+                    "total": total_sheets,
+                    "filename": os.path.basename(temp_file),
+                })
+
+                success = print_pdf_advanced(
+                    temp_file, printer_name,
+                    engine_type=engine_type,
+                    engine_path=engine_path,
+                    duplex_mode=duplex_mode,
+                )
+
+                if success:
+                    result["success_count"] += 1
+                    _cb("batch_done", {
+                        "index": idx,
+                        "total": total_sheets,
+                    })
+                else:
+                    _cb("batch_fail", {
+                        "index": idx,
+                        "total": total_sheets,
+                        "error": "打印命令发送失败",
+                    })
+
+                # 延迟等待：仅双面模式需要，且不是最后一批
+                # 单面模式无卡纸风险，直接跳过延迟
+                if is_duplex and idx < total_sheets:
+                    for remaining in range(delay_seconds, 0, -1):
+                        if _is_cancelled():
+                            result["cancelled"] = True
+                            break
+                        _cb("delay", {
+                            "remaining": remaining,
+                            "total": delay_seconds,
+                        })
+                        time.sleep(1)
+
+                    if _is_cancelled():
+                        _cb("info", {"message": "用户已取消打印"})
+                        break
+
+            # 份数之间的短暂停顿（让打印机准备好下一份）
+            if copy_idx < copies - 1 and not _is_cancelled() and copies > 1:
+                _cb("info", {"message": f"第{copy_idx + 1}份完成，准备下一份..."})
+                time.sleep(2)
 
         # 双面模式额外等待确保最后一个文件被Reader完全读取
         # 单面模式无需此等待（SumatraPDF同步返回，单面无机械复位需求）
@@ -867,6 +1024,9 @@ def default_cli_callback(event_type: str, data: dict) -> None:
         print(f"  打印引擎: {engine_name}")
         if engine_path and engine_path != "N/A":
             print(f"  引擎路径: {engine_path}")
+
+    elif event_type == "copy_start":
+        print(f"\n>>> 第 {data['copy_index']}/{data['total_copies']} 份 <<<")
 
     elif event_type == "split_start":
         print(f"PDF总页数: {data['total_pages']}")

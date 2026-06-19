@@ -13,23 +13,43 @@ PDF双面打印延迟控制脚本 - PyInstaller 打包配置
     ├── internal/                     (依赖文件)
     ├── vendor/                       (SumatraPDF便携版)
     ├── README.md
+    ├── CHANGELOG.md
     └── requirements.txt
 """
 
-from os import makedirs
+from os import makedirs, pathsep
 from os.path import basename, dirname, exists, join
 from shutil import copyfile
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, get_module_file_attribute
+
+# ============================================================
+# tkinterdnd2 数据文件收集（可选依赖）
+# ============================================================
+
+def get_tkinterdnd2_datas():
+    """
+    收集 tkinterdnd2 的数据文件（主要是 tkdnd 文件夹）
+    如果未安装 tkinterdnd2，返回空列表
+    """
+    try:
+        import tkinterdnd2
+        pkg_dir = dirname(tkinterdnd2.__file__)
+        tkdnd_src = join(pkg_dir, "tkdnd")
+        
+        datas = []
+        if exists(tkdnd_src):
+            # 将 tkdnd 文件夹复制到打包后的 tkinterdnd2/tkdnd/
+            datas.append((tkdnd_src, "tkinterdnd2/tkdnd"))
+        
+        return datas
+    except ImportError:
+        return []
 
 
 # ============================================================
 # 依赖收集
 # ============================================================
-
-binaries = []
-datas = []
-hiddenimports = []
 
 binaries = []
 datas = []
@@ -53,6 +73,18 @@ hiddenimports += [
 ]
 
 # tkinter 是 Python 内置，PyInstaller 自动处理其 tcl/tk 依赖
+
+# tkinterdnd2 可选依赖（GUI 拖拽支持）
+# 如果安装了 tkinterdnd2，添加隐藏导入和数据文件
+try:
+    import tkinterdnd2
+    hiddenimports += ["tkinterdnd2"]
+    # 收集 tkinterdnd2 的数据文件（tkdnd 文件夹）
+    tkinterdnd2_datas = get_tkinterdnd2_datas()
+    datas += tkinterdnd2_datas
+    print(f"[build.spec] tkinterdnd2 数据文件: {tkinterdnd2_datas}")
+except ImportError:
+    print("[build.spec] tkinterdnd2 未安装，跳过（拖拽功能将不可用）")
 
 
 # ============================================================
@@ -192,6 +224,7 @@ coll = COLLECT(
 
 extra_files = [
     "README.md",
+    "CHANGELOG.md",
     "requirements.txt",
 ]
 
