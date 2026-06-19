@@ -236,6 +236,71 @@ for file in extra_files:
     makedirs(dirname(dest_file), exist_ok=True)
     copyfile(file, dest_file)
 
+# ============================================================
+# 自动下载 SumatraPDF（如果 vendor 目录不存在）
+# ============================================================
+
+def download_sumatra_if_needed():
+    """
+    检查 vendor/SumatraPDF.exe 是否存在，不存在则从官网下载
+    """
+    vendor_dir = join(SPECPATH, "vendor")
+    vendor_exe = join(vendor_dir, "SumatraPDF.exe")
+
+    if exists(vendor_exe):
+        print(f"[build.spec] SumatraPDF.exe 已存在: {vendor_exe}")
+        return True
+
+    # 创建 vendor 目录
+    makedirs(vendor_dir, exist_ok=True)
+
+    # SumatraPDF 下载 URL（使用稳定版）
+    version = "3.5.2"
+
+    # 检测 Python 架构
+    import struct
+    is_64bit = struct.calcsize("P") * 8 == 64
+    arch_suffix = "64" if is_64bit else "32"
+
+    url = f"https://www.sumatrapdfreader.org/dl/rel/{version}/SumatraPDF-{version}-{arch_suffix}.exe"
+
+    print(f"[build.spec] 正在下载 SumatraPDF {version} ({arch_suffix}位)...")
+    print(f"  URL: {url}")
+
+    try:
+        from urllib.request import urlopen, Request
+
+        # 设置 User-Agent
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+
+        with urlopen(req, timeout=60) as response:
+            total_size = int(response.headers.get("Content-Length", 0))
+            downloaded = 0
+            block_size = 8192
+
+            with open(vendor_exe, "wb") as f:
+                while True:
+                    buffer = response.read(block_size)
+                    if not buffer:
+                        break
+                    downloaded += len(buffer)
+                    f.write(buffer)
+                    if total_size > 0:
+                        pct = int(downloaded / total_size * 100)
+                        print(f"\r  [build.spec] 下载进度: {pct}% ({downloaded//1024}KB/{total_size//1024}KB)", end="")
+
+            print(f"\n[build.spec] 下载完成: {vendor_exe}")
+            return True
+
+    except Exception as e:
+        print(f"[build.spec] 下载失败: {e}")
+        print(f"[build.spec] 请手动下载并放置到: {vendor_exe}")
+        print(f"[build.spec] 下载地址: <ADDRESS_REMOVED>
+        return False
+
+# 执行下载
+download_sumatra_if_needed()
+
 # 复制 SumatraPDF 便携版到 vendor 目录
 vendor_src = join(SPECPATH, "vendor", "SumatraPDF.exe")
 if exists(vendor_src):

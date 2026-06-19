@@ -88,6 +88,8 @@
 - 已内置在打包后的 `vendor/` 目录中，无需额外安装
 - 从 [SumatraPDF 官网](https://www.sumatrapdfreader.org/download-free-pdf-viewer) 下载
 - 便携版为单个 exe，无需安装，不写注册表
+- **自动下载**: 运行 `python download_sumatra.py` 可自动下载到 `vendor/` 目录
+- **编译时自动下载**: 运行 `pyinstaller build.spec` 时，如果 `vendor/SumatraPDF.exe` 不存在，会自动从官网下载
 
 ### 为什么 20 秒？
 
@@ -414,6 +416,31 @@ pip install pyinstaller
 pip install tkinterdnd2
 ```
 > 如果不需要拖拽功能，可以跳过此步骤。
+
+### 准备 SumatraPDF（自动下载）
+
+打包前需要确保 `vendor/SumatraPDF.exe` 存在，有以下两种方式：
+
+**方式 1：使用自动下载脚本（推荐）**
+```bash
+# 下载默认版本 (3.5.2) 到 vendor/ 目录
+python download_sumatra.py
+
+# 下载指定版本
+python download_sumatra.py --version 3.5.2
+
+# 强制覆盖已存在的文件
+python download_sumatra.py --force
+```
+
+**方式 2：编译时自动下载**
+```bash
+# 如果 vendor/SumatraPDF.exe 不存在，build.spec 会自动从官网下载
+pyinstaller build.spec
+```
+
+**方式 3：手动下载**
+从 [SumatraPDF 官网](https://www.sumatrapdfreader.org/download-free-pdf-viewer) 下载便携版，放入 `vendor/SumatraPDF.exe`
 
 ### 打包命令
 ```bash
