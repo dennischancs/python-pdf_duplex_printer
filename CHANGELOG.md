@@ -1,5 +1,75 @@
 # Changelog
 
+## v0.4 (2026-06-19)
+
+### 新增功能
+
+- **打印队列管理**: 
+  - CLI: `-q/--queue` 查看打印队列，`--cancel JOB_ID` 取消指定作业，`--cancel all` 取消全部
+  - GUI: 「打印队列」按钮，弹窗显示作业列表，支持选中取消或全部取消
+- **打印机型号数据库** (`printer_models.json`):
+  - 收录 Brother/HP/Canon/Epson 等常见型号及推荐延迟时间
+  - 自动检测打印机型号，显示推荐延迟和备注
+  - BROTHER MFC-7480D 等已知型号标记为已验证（实测数据）
+  - 未匹配型号自动使用通用分类（老旧激光/新款激光/喷墨/未知）
+- **网络打印机检测**: 
+  - 自动检测打印机端口类型（IP/WSD/TCP/IP）
+  - 网络打印机自动增加5秒额外延迟
+  - 打印机信息中显示网络/本地状态
+- **打印预览**:
+  - CLI: `--preview` 参数，使用 SumatraPDF 或系统默认程序打开 PDF
+  - GUI: 「预览」按钮，打开选中文件预览
+- **打印统计**:
+  - 打印完成后显示统计信息：总页数、总批次、成功率、总耗时
+  - CLI 和 GUI 日志中均显示详细统计
+
+### 修复问题
+
+- **Windows 控制台中文乱码**: 为 `cli_app.py`、`pdf_duplex_printer.py`、`download_sumatra.py` 添加 UTF-8 控制台编码设置（`sys.stdout.reconfigure(encoding='utf-8')`）
+
+### 优化改进
+
+- `show_printer_capabilities()` 新增 `is_network` 和 `model_info` 字段
+- `print_with_delay()` 自动显示打印机型号检测结果和网络状态
+- 「查看信息」对话框显示型号识别、推荐延迟、网络状态等详细信息
+- CLi 命令新增 `--queue`、`--cancel`、`--preview` 参数
+- 新增 `--preview` 用法示例
+
+### 修复 (2026-06-20)
+
+- **打印预览内嵌化**: 原预览仅用外部 SumatraPDF 打开 PDF 文件，现实现真正的应用内嵌预览界面
+  - 新增 `pdf_preview.py` 模块，使用 PyMuPDF (fitz) 将 PDF 页面渲染为图像
+  - 预览窗口反映打印设置：双面模式装订边标记（长边/短边）、页面范围筛选（全部/奇数/偶数/自定义）
+  - 支持翻页、跳页、缩放（0.5x~3.0x）、适合宽度、装订标记开关
+  - 后台线程渲染，token 机制丢弃过期请求，避免阻塞 UI
+  - PyMuPDF 不可用时自动降级为外部 SumatraPDF 打开
+  - CLI `--preview` 保持原行为（无 GUI 上下文）
+- **打印队列 Windows 11 25H2 兼容性**: 修复 25H2 下队列弹窗能开但作业列表始终为空的问题
+  - `list_print_jobs()` 改为多级降级策略：EnumJobs level=1 → level=2 → WMI 查询
+  - 返回结构改为 dict，包含 `jobs`/`method`/`diagnostics`/`error` 诊断信息
+  - 新增 `open_system_printer_queue()` 用 `rundll32 printui.dll,PrintUIEntry /o /n` 打开系统队列窗口
+  - GUI 队列弹窗新增「打开系统队列」按钮作为兜底，状态栏显示获取方式和诊断信息
+- **新增依赖**: PyMuPDF>=1.24.0（用于 PDF 页面渲染）
+
+### 技术细节
+
+- 新增文件: `printer_models.json` (打印机型号数据库), `download_sumatra.py` (SumatraPDF 自动下载)
+- 新增函数: `detect_printer_model()`, `get_recommended_delay()`, `is_network_printer()`, `list_print_jobs()`, `cancel_print_job()`, `cancel_all_jobs()`, `preview_pdf()`
+- 新增回调事件类型: `"stats"` (打印统计)
+- `print_with_delay()` 返回值保持不变，统计通过回调传递
+
+### 文件变更
+- `pdf_duplex_printer.py`: 新增7个函数 + 模型数据库加载 + 统计追踪 + 编码修复
+- `cli_app.py`: 新增3个命令 + 版本号更新 + 编码修复
+- `gui_app.py`: 新增2个按钮 + 队列管理弹窗 + 统计显示 + 模型信息展示
+- `build.spec`: 新增编译时 SumatraPDF 自动下载
+- `download_sumatra.py`: 新增 SumatraPDF 自动下载脚本
+- `printer_models.json`: 新增打印机型号数据库
+- `README.md`: 文档更新
+- `CHANGELOG.md`: 本文件更新
+
+---
+
 ## v0.3 (2026-06-19)
 
 ### 新增功能
@@ -83,19 +153,3 @@
 - 使用 `subprocess.Popen` 异步调用 Acrobat Reader 打印
 - 批次间延迟等待（逐秒倒计时，支持取消）
 - 临时文件自动清理
-
----
-
-## 未来计划
-
-### v0.4 (计划中)
-- [ ] 添加打印队列管理（查看/取消已发送的任务）
-- [ ] 支持更多打印机型号（自动检测并应用最佳延迟时间）
-- [ ] 添加打印预览功能
-- [ ] 支持网络打印机（延迟时间自动调整）
-- [ ] 添加打印统计（总页数、耗时、成功率等）
-
-### 已知问题
-- Windows控制台中文乱码（编码问题，不影响功能）
-- tkinterdnd2 为可选依赖，未安装时拖拽功能不可用
-- 部分打印机驱动不支持 DEVMODE 配置，需手动设置双面模式

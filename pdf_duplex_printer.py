@@ -28,6 +28,14 @@ import threading
 import winreg
 from typing import Callable, Optional
 
+# Fix Windows console encoding for Chinese characters
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 try:
     from pypdf import PdfReader, PdfWriter
 except ImportError:
@@ -113,6 +121,7 @@ SUMATRA_DUPLEX_MAP = {
 #   "file_done"     - 某个文件处理完成 {index, total, success_count, total_sheets}
 #   "cleanup"       - 清理临时文件 {temp_dir, kept}
 #   "done"          - 全部完成 {success_count, total_sheets, cancelled}
+#   "stats"         - 打印统计 {total_pages, elapsed_seconds, success_rate, ...}
 #   "error"         - 错误 {message}
 ProgressCallback = Optional[Callable[[str, dict], None]]
 
@@ -251,6 +260,8 @@ def show_printer_capabilities(printer_name: str) -> dict:
         "duplex": str,       # 可读名称
         "paper_size": str,   # 可读名称
         "orientation": str,  # "纵向" | "横向"
+        "is_network": bool,  # 是否为网络打印机
+        "model_info": dict,  # 型号检测结果
     }
     """
     result = {
@@ -258,6 +269,8 @@ def show_printer_capabilities(printer_name: str) -> dict:
         "duplex": "未知",
         "paper_size": "未知",
         "orientation": "未知",
+        "is_network": False,
+        "model_info": {},
     }
 
     try:
@@ -274,6 +287,12 @@ def show_printer_capabilities(printer_name: str) -> dict:
             win32print.ClosePrinter(handle)
     except Exception as e:
         result["error"] = str(e)
+
+    # 检测网络打印机
+    result["is_network"] = is_network_printer(printer_name)
+
+    # 检测打印机型号
+    result["model_info"] = detect_printer_model(printer_name)
 
     return result
 
@@ -310,6 +329,207 @@ def configure_printer_duplex(printer_name: str, duplex_mode: str = "long") -> bo
         finally:
             win32print.ClosePrinter(handle)
 
+    except Exception:
+        return False
+
+
+# ============================================================
+# 打印机型号数据库 (v0.4)
+# ============================================================
+
+def _load_printer_models() -> dict:
+    """加载打印机型号数据库"""
+    import json
+    model_paths = [
+        os.path.join(_get_app_dir(), "printer_models.json"),
+        # PyInstaller 打包后数据文件在 sys._MEIPASS (internal/ 目录)
+        os.path.join(sys._MEIPASS, "printer_models.json") if getattr(sys, 'frozen', False) else "",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "printer_models.json"),
+    ]
+    for path in model_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+
+def _match_model(printer_name: str, models: dict) -> tuple:
+    """
+    在数据库中匹配打印机型号
+
+    返回: (brand, model_key, model_info) 或 (None, None, {})
+    """
+    name_upper = printer_name.upper()
+
+    for brand, brand_models in models.items():
+        if brand in ("_description", "_version", "_note", "generic", "network_penalty", "keywords"):
+            continue
+        if not isinstance(brand_models, dict):
+            continue
+        for model_key, model_info in brand_models.items():
+            if not isinstance(model_info, dict):
+                continue
+            if model_key.upper() in name_upper:
+                return (brand, model_key, model_info)
+
+    return (None, None, {})
+
+
+def _guess_printer_type(printer_name: str, models: dict) -> str:
+    """
+    根据打印机名称猜测打印机类型
+
+    返回: "laser_old" | "laser_new" | "inkjet" | "unknown"
+    """
+    name_upper = printer_name.upper()
+    keywords = models.get("keywords", {})
+
+    # 老型号关键词
+    for kw in keywords.get("old_models", []):
+        if kw.upper() in name_upper:
+            return "laser_old"
+
+    # 新型号关键词
+    for kw in keywords.get("new_models", []):
+        if kw.upper() in name_upper:
+            return "laser_new"
+
+    # 喷墨关键词
+    for kw in keywords.get("inkjet_models", []):
+        if kw.upper() in name_upper:
+            return "inkjet"
+
+    # 根据品牌猜测
+    for brand_keyword in ["LASERJET", "LASER", "LBP"]:
+        if brand_keyword in name_upper:
+            return "laser_old"
+
+    for brand_keyword in ["INKJET", "DESKJET", "OFFICEJET"]:
+        if brand_keyword in name_upper:
+            return "inkjet"
+
+    return "unknown"
+
+
+def detect_printer_model(printer_name: str) -> dict:
+    """
+    检测打印机型号并返回推荐配置
+
+    返回: {
+        "matched": bool,
+        "brand": str or None,
+        "model": str or None,
+        "recommended_delay": int,
+        "note": str,
+        "verified": bool,
+        "printer_type": str,  # known/laser_old/laser_new/inkjet/unknown
+    }
+    """
+    models = _load_printer_models()
+    brand, model_key, model_info = _match_model(printer_name, models)
+
+    if model_info:
+        return {
+            "matched": True,
+            "brand": brand,
+            "model": model_key,
+            "recommended_delay": model_info.get("delay", 15),
+            "note": model_info.get("note", ""),
+            "verified": model_info.get("verified", False),
+            "printer_type": "known",
+        }
+
+    # 未匹配到精确型号，使用通用猜测
+    printer_type = _guess_printer_type(printer_name, models)
+    generic = models.get("generic", {}).get(printer_type, {})
+
+    return {
+        "matched": False,
+        "brand": None,
+        "model": None,
+        "recommended_delay": generic.get("delay", 15),
+        "note": generic.get("note", f"未匹配到已知型号，使用通用建议（{printer_type}）"),
+        "verified": False,
+        "printer_type": printer_type,
+    }
+
+
+def get_recommended_delay(printer_name: str, user_delay: int = None) -> int:
+    """
+    获取推荐延迟时间
+
+    参数:
+        printer_name: 打印机名称
+        user_delay: 用户手动指定的延迟（None表示未指定）
+
+    返回: 推荐的延迟秒数
+          - 如果用户指定了延迟，优先使用用户设置
+          - 否则使用数据库推荐的延迟
+    """
+    if user_delay is not None:
+        return user_delay
+
+    model_info = detect_printer_model(printer_name)
+    base_delay = model_info.get("recommended_delay", 15)
+
+    # 检测是否为网络打印机
+    if is_network_printer(printer_name):
+        models = _load_printer_models()
+        network_penalty = models.get("network_penalty", {}).get("delay", 5)
+        base_delay += network_penalty
+
+    return base_delay
+
+
+# ============================================================
+# 网络打印机检测 (v0.4)
+# ============================================================
+
+def is_network_printer(printer_name: str) -> bool:
+    """
+    检测打印机是否为网络打印机
+
+    通过检查打印机端口类型判断：
+    - IP端口（如 192.168.x.x）-> 网络打印机
+    - WSD端口 -> 网络打印机
+    - TCP/IP端口 -> 网络打印机
+    - USB端口 -> 本地打印机
+    - LPT端口 -> 本地打印机
+
+    返回: True 表示可能是网络打印机
+    """
+    try:
+        handle = win32print.OpenPrinter(printer_name)
+        try:
+            properties = win32print.GetPrinter(handle, 2)
+            port_name = properties.get("pPortName", "").upper() if properties else ""
+
+            # 网络打印机端口特征
+            network_indicators = [
+                "IP_",           # 标准TCP/IP端口
+                "WSD",           # Web Services for Devices
+                "HTTP:",         # HTTP打印
+                "HTTPS:",        # HTTPS打印
+                "IPP",           # Internet Printing Protocol
+                "LPR",           # Line Printer Remote
+            ]
+
+            # IP地址模式
+            import re
+            if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', port_name):
+                return True
+
+            for indicator in network_indicators:
+                if port_name.startswith(indicator):
+                    return True
+
+            return False
+
+        finally:
+            win32print.ClosePrinter(handle)
     except Exception:
         return False
 
@@ -410,6 +630,382 @@ def find_sumatra_pdf() -> Optional[str]:
             continue
 
     return None
+
+
+# ============================================================
+# 打印队列管理 (v0.4)
+# ============================================================
+
+def _parse_job_status(status_value):
+    """将 JOB_STATUS_* 位掩码解析为中文状态描述"""
+    if status_value == 0:
+        return "就绪"
+    parts = []
+    if status_value & win32print.JOB_STATUS_PAUSED:
+        parts.append("暂停")
+    if status_value & win32print.JOB_STATUS_ERROR:
+        parts.append("错误")
+    if status_value & win32print.JOB_STATUS_DELETING:
+        parts.append("正在删除")
+    if status_value & win32print.JOB_STATUS_SPOOLING:
+        parts.append("假脱机")
+    if status_value & win32print.JOB_STATUS_PRINTING:
+        parts.append("打印中")
+    if status_value & win32print.JOB_STATUS_OFFLINE:
+        parts.append("离线")
+    if status_value & win32print.JOB_STATUS_PAPEROUT:
+        parts.append("缺纸")
+    if status_value & win32print.JOB_STATUS_USER_INTERVENTION:
+        parts.append("用户干预")
+    if status_value & win32print.JOB_STATUS_BLOCKED_DEVQ:
+        parts.append("队列阻塞")
+    if status_value & win32print.JOB_STATUS_DELETED:
+        parts.append("已删除")
+    if status_value & win32print.JOB_STATUS_PRINTED:
+        parts.append("已打印")
+    if status_value & win32print.JOB_STATUS_RESTART:
+        parts.append("需重启")
+    if status_value & win32print.JOB_STATUS_COMPLETE:
+        parts.append("完成")
+    return ", ".join(parts) if parts else f"0x{status_value:08X}"
+
+
+def _format_submitted(submitted_time):
+    """格式化提交时间"""
+    try:
+        if submitted_time:
+            return submitted_time.strftime("%H:%M:%S")
+    except Exception:
+        pass
+    return ""
+
+
+def _normalize_job(job_info, level):
+    """
+    将 JOB_INFO_1 或 JOB_INFO_2 统一为标准 dict。
+    level 1/2 主要字段名一致（pDocument/TotalPages/pUserName/Status/JobId/Size/Submitted），
+    但 level=2 额外含 pPrinterName/pMachineName/pDriverName 等字段。
+    """
+    status_value = job_info.get("Status", 0)
+    return {
+        "job_id": job_info.get("JobId", 0),
+        "document": job_info.get("pDocument", "未知"),
+        "status": _parse_job_status(status_value),
+        "pages": job_info.get("TotalPages", 0),
+        "size": job_info.get("Size", 0),
+        "submitted": _format_submitted(job_info.get("Submitted", None)),
+        "owner": job_info.get("pUserName", ""),
+    }
+
+
+def _list_jobs_via_enumjobs(printer_name, level):
+    """
+    用 win32print.EnumJobs 指定 level 获取作业。
+    返回 (jobs_list, error_str)；成功时 error_str 为空。
+    """
+    jobs = []
+    try:
+        handle = win32print.OpenPrinter(printer_name)
+        try:
+            job_infos = win32print.EnumJobs(handle, 0, -1, level)
+            for ji in job_infos:
+                jobs.append(_normalize_job(ji, level))
+        finally:
+            win32print.ClosePrinter(handle)
+        return jobs, ""
+    except Exception as e:
+        return [], str(e)
+
+
+def _list_jobs_via_wmi(printer_name):
+    """
+    WMI 降级方案：通过 win32com 查询 Win32_PrintJob。
+    返回 (jobs_list, error_str)。
+    无需额外依赖（pywin32 自带 win32com）。
+    """
+    jobs = []
+    try:
+        import win32com.client
+        wmi = win32com.client.GetObject("winmgmts:")
+        # Win32_PrintJob.Name 字段格式为 "打印机名, 作业ID"
+        query = "SELECT * FROM Win32_PrintJob"
+        for pj in wmi.ExecQuery(query):
+            name = str(pj.Name or "")
+            # 按打印机名过滤（Name = "PrinterName, JobId"）
+            if not name.startswith(printer_name + ","):
+                continue
+            # 提取 job_id
+            try:
+                job_id = int(name.split(",", 1)[1])
+            except Exception:
+                job_id = 0
+            # 状态码映射（Win32_PrintJob.JobStatus 是字符串，StatusCode 是数字）
+            status_str = str(pj.JobStatus or "") if hasattr(pj, "JobStatus") else ""
+            if not status_str:
+                sc = int(pj.StatusCode or 0) if hasattr(pj, "StatusCode") else 0
+                status_str = _wmi_status_to_text(sc)
+            jobs.append({
+                "job_id": job_id,
+                "document": str(pj.Document or "未知"),
+                "status": status_str or "就绪",
+                "pages": int(pj.TotalPages or 0) if hasattr(pj, "TotalPages") else 0,
+                "size": int(pj.Size or 0) if hasattr(pj, "Size") else 0,
+                "submitted": "",
+                "owner": str(pj.Owner or "") if hasattr(pj, "Owner") else "",
+            })
+        return jobs, ""
+    except Exception as e:
+        return [], str(e)
+
+
+def _wmi_status_to_text(status_code):
+    """将 Win32_PrintJob.StatusCode 映射为中文（简化版）"""
+    mapping = {
+        1: "暂停", 2: "错误", 3: "正在删除", 4: "假脱机",
+        5: "打印中", 6: "离线", 7: "缺纸", 8: "已打印",
+        9: "已删除", 10: "需重启",
+    }
+    return mapping.get(status_code, f"状态码:{status_code}")
+
+
+def list_print_jobs(printer_name: str = None) -> dict:
+    """
+    列出指定打印机的打印队列（Windows 11 25H2 兼容版）。
+
+    采用多级降级策略确保 25H2 下能获取到作业：
+      方法1: win32print.EnumJobs level=1（传统本地打印机）
+      方法2: win32print.EnumJobs level=2（25H2 IPP/WPS 队列）
+      方法3: WMI 查询 Win32_PrintJob（兜底）
+    任一方法返回非空即采用；全部为空时返回空列表+诊断信息。
+
+    参数:
+        printer_name: 打印机名称，None 表示使用默认打印机
+
+    返回: {
+        "jobs": [                    # 作业列表（可能为空）
+            {
+                "job_id": int,
+                "document": str,
+                "status": str,
+                "pages": int,
+                "size": int,
+                "submitted": str,
+                "owner": str,
+            }, ...
+        ],
+        "method": str,               # 使用的获取方法: "EnumJobs-L1"/"EnumJobs-L2"/"WMI"/"none"
+        "diagnostics": str,          # 诊断信息（尝试了哪些方法、各返回多少）
+        "error": str,                # 最后一次异常文本（无异常为空字符串）
+    }
+    """
+    if printer_name is None:
+        printer_name = get_default_printer()
+
+    result = {
+        "jobs": [],
+        "method": "none",
+        "diagnostics": "",
+        "error": "",
+    }
+
+    # ---- 方法1: EnumJobs level=1 ----
+    jobs1, err1 = _list_jobs_via_enumjobs(printer_name, 1)
+    diag_parts = [f"EnumJobs-L1({len(jobs1)}个)"]
+    if jobs1:
+        result["jobs"] = jobs1
+        result["method"] = "EnumJobs-L1"
+        result["diagnostics"] = "通过 EnumJobs level=1 获取"
+        return result
+    if err1:
+        diag_parts[0] = f"EnumJobs-L1(失败: {err1[:40]})"
+        result["error"] = err1
+
+    # ---- 方法2: EnumJobs level=2 ----
+    jobs2, err2 = _list_jobs_via_enumjobs(printer_name, 2)
+    diag_parts.append(f"EnumJobs-L2({len(jobs2)}个)")
+    if jobs2:
+        result["jobs"] = jobs2
+        result["method"] = "EnumJobs-L2"
+        result["diagnostics"] = "通过 EnumJobs level=2 获取（level=1 未返回数据）"
+        return result
+    if err2 and not result["error"]:
+        result["error"] = err2
+
+    # ---- 方法3: WMI 降级 ----
+    jobs3, err3 = _list_jobs_via_wmi(printer_name)
+    diag_parts.append(f"WMI({len(jobs3)}个)")
+    if jobs3:
+        result["jobs"] = jobs3
+        result["method"] = "WMI"
+        result["diagnostics"] = "通过 WMI 查询获取（EnumJobs L1/L2 均未返回数据）"
+        return result
+    if err3 and not result["error"]:
+        result["error"] = err3
+
+    # ---- 全部为空 ----
+    result["method"] = "none"
+    if result["error"]:
+        result["diagnostics"] = (
+            f"尝试 {', '.join(diag_parts)} 均无数据。"
+            f"可能原因: 打印机无作业, 或 25H2 安全策略限制读取。"
+        )
+    else:
+        result["diagnostics"] = (
+            f"尝试 {', '.join(diag_parts)} 均无数据, 打印机可能暂无打印作业。"
+        )
+    return result
+
+
+def open_system_printer_queue(printer_name: str) -> bool:
+    """
+    打开 Windows 系统自带的打印机队列窗口（25H2 兼容）。
+
+    使用 rundll32 printui.dll,PrintUIEntry /o /n "打印机名" 命令，
+    这是微软官方支持的打开系统打印队列窗口的方式。
+
+    参数:
+        printer_name: 打印机名称
+
+    返回: 是否成功启动
+    """
+    try:
+        subprocess.Popen(
+            ["rundll32", "printui.dll,PrintUIEntry", "/o", "/n", printer_name],
+            shell=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def cancel_print_job(printer_name: str, job_id: int) -> bool:
+    """
+    取消指定的打印作业
+
+    参数:
+        printer_name: 打印机名称
+        job_id: 作业ID（从 list_print_jobs 获取）
+
+    返回: 是否成功取消
+    """
+    try:
+        handle = win32print.OpenPrinter(printer_name)
+        try:
+            win32print.SetJob(handle, job_id, 0, None, win32print.JOB_CONTROL_DELETE)
+            return True
+        finally:
+            win32print.ClosePrinter(handle)
+    except Exception:
+        return False
+
+
+def cancel_all_jobs(printer_name: str = None) -> tuple:
+    """
+    取消打印机的所有打印作业
+
+    参数:
+        printer_name: 打印机名称，None 表示使用默认打印机
+
+    返回: (cancelled_count, failed_count)
+    """
+    if printer_name is None:
+        printer_name = get_default_printer()
+
+    # list_print_jobs 返回 dict，取 "jobs" 字段
+    result = list_print_jobs(printer_name)
+    jobs = result.get("jobs", [])
+    cancelled = 0
+    failed = 0
+
+    for job in jobs:
+        if cancel_print_job(printer_name, job["job_id"]):
+            cancelled += 1
+        else:
+            failed += 1
+
+    return (cancelled, failed)
+
+
+# ============================================================
+# 打印预览 (v0.4)
+# ============================================================
+
+def preview_pdf(pdf_file: str) -> bool:
+    """
+    使用 SumatraPDF 或系统默认程序打开 PDF 预览
+
+    参数:
+        pdf_file: PDF 文件路径
+
+    返回: 是否成功打开
+    """
+    if not os.path.exists(pdf_file):
+        return False
+
+    abs_path = os.path.abspath(pdf_file)
+
+    # 优先使用 SumatraPDF（内置或已安装）
+    sumatra_path = find_sumatra_pdf()
+    if sumatra_path:
+        try:
+            # 使用 CREATE_NEW_PROCESS_GROUP 避免子进程被父进程的 Ctrl+C 影响
+            # DETACHED_PROCESS 让 SumatraPDF 独立运行
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000008  # DETACHED_PROCESS
+            subprocess.Popen(
+                [sumatra_path, abs_path],
+                shell=False,
+                creationflags=creationflags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except Exception as e:
+            # SumatraPDF 启动失败，尝试降级
+            pass
+
+    # 降级：使用系统默认程序打开
+    try:
+        os.startfile(abs_path)
+        return True
+    except Exception:
+        return False
+
+
+def get_pdf_info(pdf_file: str) -> dict:
+    """
+    获取 PDF 文件信息（用于预览展示）
+
+    返回: {
+        "path": str,           # 完整路径
+        "filename": str,       # 文件名
+        "page_count": int,     # 页数
+        "file_size": int,      # 文件大小（字节）
+        "file_size_mb": float, # 文件大小（MB）
+    }
+    """
+    info = {
+        "path": os.path.abspath(pdf_file),
+        "filename": os.path.basename(pdf_file),
+        "page_count": 0,
+        "file_size": 0,
+        "file_size_mb": 0.0,
+    }
+
+    if os.path.exists(pdf_file):
+        info["file_size"] = os.path.getsize(pdf_file)
+        info["file_size_mb"] = round(info["file_size"] / (1024 * 1024), 2)
+
+    # 尝试读取页数（pypdf 可能不可用或文件损坏）
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(pdf_file)
+        info["page_count"] = len(reader.pages)
+    except Exception:
+        pass
+
+    return info
 
 
 def find_print_engine(preferred_engine: str = "auto") -> tuple:
@@ -831,12 +1427,28 @@ def print_with_delay(
         _cb("error", {"message": f"文件不存在: {pdf_file}"})
         return result
 
+    # 打印统计：记录开始时间和总页数
+    start_time = time.time()
+    total_pages = 0
+
     # 确定打印机
     if printer_name is None:
         printer_name = get_default_printer()
         _cb("info", {"message": f"使用默认打印机: {printer_name}"})
     else:
         _cb("info", {"message": f"使用打印机: {printer_name}"})
+
+    # 显示打印机型号检测结果
+    model_info = detect_printer_model(printer_name)
+    if model_info["matched"]:
+        _cb("info", {"message": f"检测到打印机型号: {model_info['brand'].upper()} {model_info['model']}"})
+        _cb("info", {"message": f"推荐延迟: {model_info['recommended_delay']}秒 ({model_info['note']})"})
+    else:
+        _cb("info", {"message": f"未匹配已知型号，推荐延迟: {model_info['recommended_delay']}秒（{model_info['note']}）"})
+
+    # 检测网络打印机
+    if is_network_printer(printer_name):
+        _cb("info", {"message": "检测为网络打印机，延迟已自动增加5秒"})
 
     # 解析打印引擎（只解析一次）
     engine_type, engine_path = find_print_engine(engine)
@@ -894,6 +1506,8 @@ def print_with_delay(
         if is_duplex:
             # 双面模式：按2页一批拆分PDF，每批打印后延迟等待打印机机械复位
             temp_files = split_pdf_for_duplex(actual_pdf, temp_dir, progress_callback)
+            reader = PdfReader(actual_pdf)
+            total_pages = len(reader.pages)
         else:
             # 单面模式：无需拆分，直接打印整个PDF文件
             reader = PdfReader(actual_pdf)
@@ -1005,6 +1619,22 @@ def print_with_delay(
         "cancelled": result["cancelled"],
     })
 
+    # 打印统计 (v0.4)
+    elapsed = time.time() - start_time
+    success_rate = (result["success_count"] / result["total_sheets"] * 100) if result["total_sheets"] > 0 else 0
+    _cb("stats", {
+        "total_pages": total_pages * copies,
+        "total_batches": result["total_sheets"] * copies,
+        "success_batches": result["success_count"],
+        "failed_batches": result["total_sheets"] * copies - result["success_count"],
+        "success_rate": success_rate,
+        "elapsed_seconds": elapsed,
+        "elapsed_formatted": f"{int(elapsed // 60)}分{int(elapsed % 60)}秒",
+        "delay_seconds": delay_seconds if is_duplex else 0,
+        "printer_name": printer_name,
+        "engine_type": engine_type,
+    })
+
     return result
 
 
@@ -1076,6 +1706,22 @@ def default_cli_callback(event_type: str, data: dict) -> None:
             print(f"\n打印已取消! 已完成 {success}/{total} 批次")
         else:
             print(f"\n打印任务完成! 成功发送 {success}/{total} 批次")
+
+    elif event_type == "stats":
+        print(f"\n{'='*50}")
+        print("打印统计")
+        print(f"{'='*50}")
+        print(f"  总页数:       {data['total_pages']}")
+        print(f"  总批次数:     {data['total_batches']}")
+        print(f"  成功批次:     {data['success_batches']}")
+        print(f"  失败批次:     {data['failed_batches']}")
+        print(f"  成功率:       {data['success_rate']:.1f}%")
+        print(f"  总耗时:       {data['elapsed_formatted']}")
+        print(f"  延迟设置:     {data['delay_seconds']}秒")
+        print(f"  打印机:       {data['printer_name']}")
+        engine_names = {"sumatra": "SumatraPDF", "acrobat": "Acrobat Reader", "shell": "系统默认"}
+        print(f"  打印引擎:     {engine_names.get(data['engine_type'], data['engine_type'])}")
+        print(f"{'='*50}")
 
     elif event_type == "error":
         print(f"错误: {data.get('message', '未知错误')}")

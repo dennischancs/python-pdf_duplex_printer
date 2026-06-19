@@ -3,6 +3,7 @@
 
 pywin32>=306
 pypdf>=4.0
+PyMuPDF>=1.24.0
 
 # 可选依赖（GUI拖拽支持）:
 #   pip install tkinterdnd2
@@ -10,9 +11,10 @@ pypdf>=4.0
 tkinterdnd2>=0.3.0; platform_system=="Windows"
 
 # 说明:
-# - pywin32:  Windows系统API封装 (win32print, win32api, win32con)
-# - pypdf:    PDF文件处理 (读取/拆分)
-# - tkinter:  Python标准库内置，无需安装
+# - pywin32:   Windows系统API封装 (win32print, win32api, win32con, win32com)
+# - pypdf:     PDF文件处理 (读取/拆分)
+# - PyMuPDF:   PDF页面渲染为图像 (应用内嵌打印预览，v0.4新增)
+# - tkinter:   Python标准库内置，无需安装
 # - tkinterdnd2: GUI拖拽支持（可选，仅Windows）
 #
 # 打包工具（开发依赖，单独安装）:

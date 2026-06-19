@@ -13,6 +13,14 @@ import struct
 import sys
 from pathlib import Path
 
+# Fix Windows console encoding for Chinese characters
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 DEFAULT_VERSION = "3.5.2"
 
 

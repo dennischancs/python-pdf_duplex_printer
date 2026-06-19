@@ -1,10 +1,11 @@
 # PDF双面打印延迟控制脚本
 
-> **版本**: v0.3  
+> **版本**: v0.4  
 > 专为 Brother MFC-7480D 等老旧打印机设计的智能双面打印解决方案  
 > **彻底解决连续双面打印卡纸问题**  
 > 支持 CLI 命令行 + GUI 图形界面双模式  
-> 支持文件/文件夹批量打印、份数设置、页面范围选择
+> 支持文件/文件夹批量打印、份数设置、页面范围选择  
+> **新功能**: 打印队列管理 | 打印机型号自动识别 | 网络打印机检测 | 应用内嵌打印预览 | 打印统计
 
 ---
 
@@ -104,10 +105,12 @@
 
 ```
 pdf_duplex_printer/
-├── pdf_duplex_printer.py    # 核心模块（PDF拆分、打印控制、打印机管理、多引擎支持）
-├── cli_app.py               # CLI 命令行入口（argparse）
-├── gui_app.py               # GUI 图形界面入口（tkinter + Tooltip + 拖拽支持）
-├── build.spec               # PyInstaller 打包配置
+├── pdf_duplex_printer.py    # 核心模块（PDF拆分、打印控制、打印机管理、多引擎支持、型号数据库）
+├── cli_app.py               # CLI 命令行入口（argparse，支持队列管理/预览/统计）
+├── gui_app.py               # GUI 图形界面入口（tkinter + Tooltip + 拖拽支持 + 队列管理）
+├── build.spec               # PyInstaller 打包配置（自动下载 SumatraPDF）
+├── download_sumatra.py      # SumatraPDF 便携版自动下载脚本
+├── printer_models.json      # 打印机型号数据库（推荐延迟时间）
 ├── requirements.txt         # Python 依赖声明
 ├── vendor/
 │   └── SumatraPDF.exe     # SumatraPDF 便携版（打印引擎）
@@ -135,7 +138,7 @@ pip install -r requirements.txt
 
 或手动安装：
 ```bash
-pip install pywin32 pypdf
+pip install pywin32 pypdf PyMuPDF
 ```
 
 ### 可选依赖（GUI 拖拽支持）
@@ -149,6 +152,7 @@ pip install tkinterdnd2
 |---|------|
 | **pywin32** | Windows 系统 API 封装，用于打印机控制和打印任务管理 |
 | **pypdf** | PDF 文件处理库，用于读取和拆分 PDF 文档 |
+| **PyMuPDF** | PDF 页面渲染为图像，用于应用内嵌打印预览 |
 | **tkinter** | Python 标准库内置，GUI 界面（无需安装） |
 | **tkinterdnd2** | GUI 拖拽支持（可选，仅 Windows） |
 
@@ -192,6 +196,15 @@ python cli_app.py document.pdf -r "1-5,8,10-12"
 
 # 指定打印引擎
 python cli_app.py document.pdf -e sumatra
+
+# 预览 PDF（不打印）
+python cli_app.py document.pdf --preview
+
+# 查看打印队列
+python cli_app.py -q -p Brother
+
+# 取消打印作业
+python cli_app.py --cancel 1 -p Brother
 ```
 
 #### 辅助命令
@@ -228,7 +241,10 @@ python cli_app.py --help
                          acrobat: 强制使用 Acrobat Reader
                          shell: 使用系统默认程序
   -l, --list            列出所有可用打印机
-  -i, --info            显示打印机当前配置信息
+  -i, --info            显示打印机当前配置信息（含型号识别和推荐延迟）
+  -q, --queue           查看打印队列（需配合 -p 指定打印机）
+  --cancel JOB_ID       取消指定打印作业（需配合 -p）。使用 'all' 取消全部
+  --preview             预览 PDF 文件（不打印）
   --duplex {long,short,none}
                         双面打印模式: long=长边翻转(默认), short=短边翻转, none=单面
   --keep-temp           保留临时文件（用于调试）

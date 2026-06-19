@@ -56,11 +56,15 @@ datas = []
 hiddenimports = []
 
 # 收集 pypdf 模块的所有依赖（数据文件、二进制、隐式导入）
-for module in ["pypdf"]:
+# v0.4 修复: 新增 PyMuPDF (fitz/pymupdf) 用于应用内嵌 PDF 预览渲染
+for module in ["pypdf", "fitz", "pymupdf"]:
     module_datas, module_binaries, module_hiddenimports = collect_all(module)
     datas += module_datas
     binaries += module_binaries
     hiddenimports += module_hiddenimports
+
+# printer_models.json 数据文件（v0.4 打印机型号数据库）
+datas += [("printer_models.json", ".")]
 
 # pywin32 的隐式导入
 hiddenimports += [
@@ -295,7 +299,7 @@ def download_sumatra_if_needed():
     except Exception as e:
         print(f"[build.spec] 下载失败: {e}")
         print(f"[build.spec] 请手动下载并放置到: {vendor_exe}")
-        print(f"[build.spec] 下载地址: <ADDRESS_REMOVED>
+        print(f"[build.spec] 下载地址: https://www.sumatrapdfreader.org/download-free-pdf-viewer")
         return False
 
 # 执行下载

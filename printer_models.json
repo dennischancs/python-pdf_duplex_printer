@@ -1,0 +1,136 @@
+{
+    "_description": "已知打印机型号数据库 - 收录推荐延迟时间和特性",
+    "_version": "1.0",
+    "_note": "延迟时间基于用户反馈和实测数据，单位：秒",
+
+    "brother": {
+        "MFC-7480D": {
+            "delay": 20,
+            "note": "双面打印连续卡纸Bug，需要较长延迟",
+            "verified": true
+        },
+        "MFC-7360": {
+            "delay": 18,
+            "note": "与7480D类似，但问题较轻",
+            "verified": false
+        },
+        "MFC-7860DN": {
+            "delay": 15,
+            "note": "网络型号，双面打印较稳定",
+            "verified": false
+        },
+        "DCP-7080": {
+            "delay": 15,
+            "note": "中端型号",
+            "verified": false
+        },
+        "DCP-7080D": {
+            "delay": 15,
+            "note": "带自动双面",
+            "verified": false
+        },
+        "HL-2260": {
+            "delay": 12,
+            "note": "激光打印机，较新",
+            "verified": false
+        },
+        "HL-2260D": {
+            "delay": 12,
+            "note": "带自动双面",
+            "verified": false
+        },
+        "HL-L2350DW": {
+            "delay": 10,
+            "note": "新型号，双面较稳定",
+            "verified": false
+        }
+    },
+
+    "hp": {
+        "LaserJet 1020": {
+            "delay": 10,
+            "note": "经典激光打印机，双面需手动",
+            "verified": false
+        },
+        "LaserJet P1102": {
+            "delay": 10,
+            "note": "入门激光打印",
+            "verified": false
+        },
+        "LaserJet M1005": {
+            "delay": 12,
+            "note": "多功能一体机",
+            "verified": false
+        },
+        "LaserJet Pro MFP M126": {
+            "delay": 10,
+            "note": "较新型号",
+            "verified": false
+        }
+    },
+
+    "canon": {
+        "LBP2900": {
+            "delay": 12,
+            "note": "经典入门激光打印，处理速度较慢",
+            "verified": false
+        },
+        "LBP3000": {
+            "delay": 10,
+            "note": "入门激光打印",
+            "verified": false
+        },
+        "MF3010": {
+            "delay": 12,
+            "note": "入门多功能一体",
+            "verified": false
+        }
+    },
+
+    "epson": {
+        "L3110": {
+            "delay": 8,
+            "note": "墨仓式喷墨打印机",
+            "duplex_note": "无自动双面，需手动翻页"
+        },
+        "L3150": {
+            "delay": 8,
+            "note": "墨仓式喷墨打印机"
+        },
+        "L4160": {
+            "delay": 10,
+            "note": "墨仓式支持自动双面",
+            "verified": false
+        }
+    },
+
+    "generic": {
+        "laser_old": {
+            "delay": 18,
+            "note": "老旧激光打印机（通用建议）"
+        },
+        "laser_new": {
+            "delay": 10,
+            "note": "较新激光打印机（通用建议）"
+        },
+        "inkjet": {
+            "delay": 8,
+            "note": "喷墨打印机（通用建议）"
+        },
+        "unknown": {
+            "delay": 15,
+            "note": "未知型号（通用建议）"
+        }
+    },
+
+    "network_penalty": {
+        "delay": 5,
+        "note": "网络打印机额外延迟（秒），自动叠加到基础延迟"
+    },
+
+    "keywords": {
+        "old_models": ["7480", "7360", "1020", "2900", "3000", "P1102", "M1005"],
+        "new_models": ["L2350", "L2370", "M126", "M227", "M283"],
+        "inkjet_models": ["L3", "L4", "G", "MG", "TS", "IP", "DeskJet", "OfficeJet"]
+    }
+}

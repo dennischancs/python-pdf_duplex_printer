@@ -23,12 +23,20 @@ PDF双面打印延迟控制脚本 - CLI 入口
   python cli_app.py -i -p Brother                   查看指定打印机信息
 """
 
-__version__ = "v0.3"
+__version__ = "v0.4"
 
 
 import argparse
 import os
 import sys
+
+# Fix Windows console encoding for Chinese characters
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 from pdf_duplex_printer import (
     get_available_printers,
@@ -41,6 +49,11 @@ from pdf_duplex_printer import (
     print_with_delay,
     discover_pdf_files,
     default_cli_callback,
+    list_print_jobs,
+    cancel_print_job,
+    cancel_all_jobs,
+    preview_pdf,
+    get_pdf_info,
 )
 
 
@@ -82,6 +95,23 @@ def cmd_show_printer_info(printer_input: str = None):
     print(f"  双面打印: {info['duplex']}")
     print(f"  纸张大小: {info['paper_size']}")
     print(f"  方向:     {info['orientation']}")
+    if info.get("is_network"):
+        print(f"  类型:     网络打印机（延迟会自动增加）")
+    else:
+        print(f"  类型:     本地打印机")
+
+    # 型号检测信息
+    model_info = info.get("model_info", {})
+    if model_info.get("matched"):
+        print(f"  型号:     {model_info['brand'].upper()} {model_info['model']}")
+        print(f"  推荐延迟: {model_info['recommended_delay']}秒 ({model_info['note']})")
+        if model_info.get("verified"):
+            print(f"  数据来源: 已验证（实测）")
+        else:
+            print(f"  数据来源: 通用建议")
+    else:
+        print(f"  推荐延迟: {model_info.get('recommended_delay', '未知')}秒 ({model_info.get('note', '未知型号')})")
+
     if "error" in info:
         print(f"  错误:     {info['error']}")
     print("-" * 50 + "\n")
@@ -153,6 +183,18 @@ def main():
         choices=["auto", "sumatra", "acrobat", "shell"], default="auto",
         help="打印引擎: auto=自动选择(默认), sumatra=SumatraPDF, acrobat=Acrobat Reader, shell=系统默认"
     )
+    parser.add_argument(
+        "-q", "--queue", action="store_true",
+        help="查看指定打印机的打印队列（需配合 -p 指定打印机，否则查看默认打印机）"
+    )
+    parser.add_argument(
+        "--cancel", type=str, metavar="JOB_ID",
+        help="取消指定打印作业（需配合 -p 指定打印机）。使用 'all' 取消所有作业"
+    )
+    parser.add_argument(
+        "--preview", action="store_true",
+        help="预览 PDF 文件（使用 SumatraPDF 或系统默认程序打开）"
+    )
 
     args = parser.parse_args()
 
@@ -164,6 +206,105 @@ def main():
     # --- 查看打印机信息 ---
     if args.info:
         cmd_show_printer_info(args.printer)
+        return
+
+    # --- 查看打印队列 ---
+    if args.queue:
+        # 解析打印机
+        if args.printer:
+            matched, _ = resolve_printer(args.printer)
+            if not matched:
+                print(f"未找到匹配的打印机: {args.printer}")
+                return
+            printer_name = matched
+        else:
+            printer_name = get_default_printer()
+            print(f"默认打印机: {printer_name}")
+
+        result = list_print_jobs(printer_name)
+        jobs = result.get("jobs", [])
+        method = result.get("method", "none")
+        diagnostics = result.get("diagnostics", "")
+        error = result.get("error", "")
+        print(f"\n打印队列 '{printer_name}':")
+        print("-" * 60)
+        if not jobs:
+            print("  (队列为空)")
+            if diagnostics:
+                print(f"  诊断: {diagnostics}")
+            if error:
+                print(f"  错误: {error}")
+        else:
+            for job in jobs:
+                size_str = f"{job['size'] / 1024:.1f}KB" if job['size'] > 0 else "-"
+                print(f"  作业ID: {job['job_id']}")
+                print(f"    文档:   {job['document']}")
+                print(f"    状态:   {job['status']}")
+                print(f"    页数:   {job['pages']}")
+                print(f"    大小:   {size_str}")
+                print(f"    提交者: {job['owner']}")
+                if job['submitted']:
+                    print(f"    时间:   {job['submitted']}")
+                print()
+        print("-" * 60)
+        print(f"共 {len(jobs)} 个待处理作业  [获取方式: {method}]")
+        if diagnostics and jobs:
+            print(f"诊断: {diagnostics}")
+        print()
+        return
+
+    # --- 取消打印作业 ---
+    if args.cancel is not None:
+        # 解析打印机
+        if args.printer:
+            matched, _ = resolve_printer(args.printer)
+            if not matched:
+                print(f"未找到匹配的打印机: {args.printer}")
+                return
+            printer_name = matched
+        else:
+            printer_name = get_default_printer()
+
+        if args.cancel.lower() == 'all':
+            print(f"\n正在取消 '{printer_name}' 的所有打印作业...")
+            cancelled, failed = cancel_all_jobs(printer_name)
+            print(f"已取消 {cancelled} 个，失败 {failed} 个")
+        else:
+            try:
+                job_id = int(args.cancel)
+                print(f"\n正在取消 '{printer_name}' 的作业 #{job_id}...")
+                if cancel_print_job(printer_name, job_id):
+                    print("取消成功")
+                else:
+                    print("取消失败（作业不存在或权限不足）")
+            except ValueError:
+                print(f"无效的作业ID: {args.cancel}（应为数字或 'all'）")
+        return
+
+    # --- 预览 PDF ---
+    if args.preview:
+        if not args.pdf_file:
+            print("错误: 请指定要预览的 PDF 文件")
+            return
+        if not os.path.exists(args.pdf_file):
+            print(f"错误: 找不到文件 '{args.pdf_file}'")
+            return
+
+        # 显示文件信息
+        info = get_pdf_info(args.pdf_file)
+        print(f"\nPDF 文件信息:")
+        print("-" * 40)
+        print(f"  文件名:    {info['filename']}")
+        print(f"  页数:      {info['page_count']} 页")
+        print(f"  文件大小:  {info['file_size']:,} 字节 ({info['file_size_mb']} MB)")
+        print(f"  路径:      {info['path']}")
+        print("-" * 40)
+
+        print(f"\n正在打开预览: {info['filename']}")
+        if not preview_pdf(args.pdf_file):
+            print("预览失败: 无法打开 PDF 文件")
+        else:
+            print("预览已打开 (SumatraPDF)")
         return
 
     # --- 打印流程 ---

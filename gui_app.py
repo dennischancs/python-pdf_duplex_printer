@@ -19,7 +19,7 @@ PDF双面打印延迟控制脚本 - GUI 入口 (tkinter)
 依赖: tkinterdnd2 (用于拖拽支持)
 """
 
-__version__ = "v0.3"
+__version__ = "v0.4"
 
 
 import os
@@ -35,7 +35,22 @@ from pdf_duplex_printer import (
     show_printer_capabilities,
     print_with_delay,
     discover_pdf_files,
+    list_print_jobs,
+    cancel_print_job,
+    cancel_all_jobs,
+    preview_pdf,
+    get_pdf_info,
+    find_sumatra_pdf,
+    open_system_printer_queue,
 )
+
+# 应用内嵌 PDF 预览（依赖 PyMuPDF，不可用时降级为外部打开）
+try:
+    from pdf_preview import PDFPreviewDialog
+    HAS_PREVIEW_DIALOG = True
+except ImportError:
+    HAS_PREVIEW_DIALOG = False
+    PDFPreviewDialog = None
 
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -373,6 +388,14 @@ class DuplexPrinterGUI:
         self.cancel_btn.grid(row=0, column=1, padx=(0, 8))
         Tooltip(self.cancel_btn, "取消当前正在执行的打印任务\n已发送的打印作业仍会完成")
 
+        self.preview_btn = ttk.Button(btn_frame, text="预览", command=self.on_preview)
+        self.preview_btn.grid(row=0, column=2, padx=(0, 8))
+        Tooltip(self.preview_btn, "应用内预览PDF，反映双面模式和页面范围设置\n显示装订边标记，不发送打印任务")
+
+        self.queue_btn = ttk.Button(btn_frame, text="打印队列", command=self.on_show_queue)
+        self.queue_btn.grid(row=0, column=3)
+        Tooltip(self.queue_btn, "查看并管理打印机当前的打印队列\n可取消卡住的打印作业")
+
         # --- 进度条 ---
         progress_frame = ttk.Frame(main_frame)
         progress_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 8))
@@ -517,12 +540,32 @@ class DuplexPrinterGUI:
             return
 
         info = show_printer_capabilities(printer_name)
+        model_info = info.get("model_info", {})
+        network_text = "是（网络打印机，延迟会自动增加）" if info.get("is_network") else "否（本地打印机）"
+
         info_text = (
             f"打印机: {info['name']}\n"
             f"双面打印: {info['duplex']}\n"
             f"纸张大小: {info['paper_size']}\n"
-            f"方向:     {info['orientation']}"
+            f"方向:     {info['orientation']}\n"
+            f"网络打印: {network_text}\n"
         )
+
+        if model_info.get("matched"):
+            info_text += (
+                f"\n【型号识别】\n"
+                f"品牌/型号: {model_info['brand'].upper()} {model_info['model']}\n"
+                f"推荐延迟: {model_info['recommended_delay']}秒\n"
+                f"备注: {model_info['note']}\n"
+                f"数据来源: {'已验证（实测）' if model_info.get('verified') else '通用建议'}\n"
+            )
+        else:
+            info_text += (
+                f"\n【型号识别】\n"
+                f"推荐延迟: {model_info.get('recommended_delay', '未知')}秒\n"
+                f"备注: {model_info.get('note', '未匹配到已知型号')}\n"
+            )
+
         if "error" in info:
             info_text += f"\n错误: {info['error']}"
 
@@ -621,6 +664,200 @@ class DuplexPrinterGUI:
                 self.cancel_event.set()
                 self._log("正在取消打印...")
                 self.cancel_btn.config(state="disabled")
+
+    def on_preview(self):
+        """预览 PDF 文件（应用内嵌预览，反映打印设置）"""
+        pdf_input = self.pdf_path.get()
+        if not pdf_input:
+            messagebox.showwarning("提示", "请先选择PDF文件")
+            return
+
+        if os.path.isdir(pdf_input):
+            pdfs = discover_pdf_files(pdf_input)
+            if not pdfs:
+                messagebox.showwarning("提示", "文件夹中没有PDF文件")
+                return
+            pdf_file = pdfs[0]
+            if len(pdfs) > 1:
+                self._log(f"文件夹中有 {len(pdfs)} 个PDF文件，预览第一个")
+        else:
+            pdf_file = pdf_input
+
+        if not os.path.exists(pdf_file):
+            messagebox.showerror("预览失败", f"找不到文件:\n{pdf_file}")
+            return
+
+        # 读取当前打印设置
+        duplex_mode = self.duplex_var.get()          # long / short / none
+        page_range = self.page_range_var.get()        # all / odd / even / custom
+        custom_range_str = self.page_range_custom_entry.get() if page_range == "custom" else ""
+
+        self._log(f"打开预览: {os.path.basename(pdf_file)} "
+                  f"(双面:{duplex_mode}, 范围:{page_range}"
+                  f"{f'[{custom_range_str}]' if custom_range_str else ''})")
+
+        # 优先使用应用内嵌预览（需 PyMuPDF）
+        if HAS_PREVIEW_DIALOG:
+            try:
+                PDFPreviewDialog(self.root, pdf_file, duplex_mode,
+                                 page_range, custom_range_str)
+                self._log("预览窗口已打开")
+            except Exception as ex:
+                self._log(f"内嵌预览异常: {ex}，降级为外部打开")
+                if not preview_pdf(pdf_file):
+                    messagebox.showerror("预览失败",
+                        f"无法打开文件:\n{pdf_file}\n\n"
+                        f"内嵌预览异常: {ex}\n"
+                        f"外部预览也失败，请确认已安装 SumatraPDF。")
+        else:
+            # PyMuPDF 不可用，降级为外部 SumatraPDF 打开
+            if not preview_pdf(pdf_file):
+                messagebox.showerror("预览失败",
+                    f"无法打开文件:\n{pdf_file}\n\n"
+                    f"应用内嵌预览不可用（缺少 PyMuPDF 库），\n"
+                    f"外部预览也失败，请确认已安装 SumatraPDF 或系统默认的 PDF 阅读器。")
+            else:
+                self._log("预览已通过外部程序打开（内嵌预览不可用）")
+
+    def on_show_queue(self):
+        """显示打印队列管理对话框"""
+        printer_name = self.printer_var.get()
+        if not printer_name:
+            messagebox.showwarning("提示", "请先选择打印机")
+            return
+
+        # 创建队列对话框
+        queue_dialog = tk.Toplevel(self.root)
+        queue_dialog.title(f"打印队列 - {printer_name}")
+        queue_dialog.geometry("600x440")
+        queue_dialog.minsize(550, 340)
+        queue_dialog.transient(self.root)
+        queue_dialog.grab_set()
+
+        # 树形表格
+        columns = ("job_id", "document", "status", "pages", "owner")
+        tree = ttk.Treeview(queue_dialog, columns=columns, show="headings", selectmode="browse")
+        tree.heading("job_id", text="作业ID")
+        tree.heading("document", text="文档名")
+        tree.heading("status", text="状态")
+        tree.heading("pages", text="页数")
+        tree.heading("owner", text="提交者")
+
+        tree.column("job_id", width=60, anchor="center")
+        tree.column("document", width=200)
+        tree.column("status", width=90, anchor="center")
+        tree.column("pages", width=50, anchor="center")
+        tree.column("owner", width=100)
+
+        scrollbar = ttk.Scrollbar(queue_dialog, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+
+        tree.grid(row=0, column=0, columnspan=4, sticky="nsew", padx=8, pady=(8, 4))
+        scrollbar.grid(row=0, column=4, sticky="ns", pady=(8, 4))
+
+        queue_dialog.columnconfigure(0, weight=1)
+        queue_dialog.rowconfigure(0, weight=1)
+
+        # 按钮
+        btn_frame = ttk.Frame(queue_dialog)
+        btn_frame.grid(row=1, column=0, columnspan=4, sticky="ew", padx=8, pady=4)
+
+        # 状态标签（显示诊断信息）
+        status_label = ttk.Label(queue_dialog, text="正在加载...", anchor="center")
+        status_label.grid(row=2, column=0, columnspan=4, sticky="ew", padx=8, pady=(0, 4))
+
+        def refresh_queue():
+            for item in tree.get_children():
+                tree.delete(item)
+            try:
+                result = list_print_jobs(printer_name)
+            except Exception as ex:
+                status_label.configure(text=f"获取失败: {ex}")
+                return
+            jobs = result.get("jobs", [])
+            method = result.get("method", "none")
+            diagnostics = result.get("diagnostics", "")
+            error = result.get("error", "")
+            if not jobs:
+                if error:
+                    status_label.configure(
+                        text=f"(队列为空) {diagnostics}  [错误: {error[:60]}]",
+                        foreground="#C62828")
+                else:
+                    status_label.configure(text=f"(队列为空) {diagnostics}",
+                                           foreground="#666666")
+            else:
+                method_label = {"EnumJobs-L1": "API", "EnumJobs-L2": "API(L2)",
+                                "WMI": "WMI"}.get(method, method)
+                status_label.configure(
+                    text=f"共 {len(jobs)} 个待处理作业  [获取方式: {method_label}]",
+                    foreground="#2E7D32")
+            for job in jobs:
+                tree.insert("", "end", values=(
+                    job["job_id"], job["document"], job["status"],
+                    job["pages"], job["owner"],
+                ))
+
+        refresh_btn = ttk.Button(btn_frame, text="刷新", command=refresh_queue)
+        refresh_btn.pack(side="left", padx=(0, 8))
+
+        def cancel_selected():
+            selection = tree.selection()
+            if not selection:
+                messagebox.showwarning("提示", "请先选择要取消的作业")
+                return
+            item = selection[0]
+            values = tree.item(item, "values")
+            job_id = int(values[0])
+            doc = values[1]
+
+            confirm = messagebox.askyesno(
+                "确认取消", f"确定要取消作业 #{job_id} 吗？\n\n文档: {doc}"
+            )
+            if confirm:
+                if cancel_print_job(printer_name, job_id):
+                    self._log(f"已取消作业 #{job_id}: {doc}")
+                    refresh_queue()
+                else:
+                    messagebox.showerror("错误", f"取消失败: 作业 #{job_id}")
+
+        cancel_btn = ttk.Button(btn_frame, text="取消选中作业", command=cancel_selected)
+        cancel_btn.pack(side="left", padx=(0, 8))
+
+        def cancel_all():
+            confirm = messagebox.askyesno(
+                "确认取消全部", f"确定要取消 '{printer_name}' 的所有打印作业吗？\n\n此操作不可撤销！"
+            )
+            if confirm:
+                cancelled, failed = cancel_all_jobs(printer_name)
+                self._log(f"已取消 {cancelled} 个作业（{failed} 个失败）")
+                refresh_queue()
+                messagebox.showinfo("完成", f"已取消 {cancelled} 个作业")
+
+        cancel_all_btn = ttk.Button(btn_frame, text="取消全部", command=cancel_all)
+        cancel_all_btn.pack(side="left", padx=(0, 8))
+
+        def open_sys_queue():
+            """打开 Windows 系统打印队列窗口（25H2 兼容兜底）"""
+            if open_system_printer_queue(printer_name):
+                self._log(f"已打开系统打印队列窗口: {printer_name}")
+            else:
+                messagebox.showerror("错误",
+                    f"无法打开系统打印队列窗口。\n"
+                    f"打印机: {printer_name}\n\n"
+                    f"可手动打开: 设置 → 蓝牙和设备 → 打印机和扫描仪 → 选择打印机 → 打开队列")
+
+        sys_queue_btn = ttk.Button(btn_frame, text="打开系统队列", command=open_sys_queue)
+        sys_queue_btn.pack(side="left", padx=(0, 8))
+        Tooltip(sys_queue_btn, "打开 Windows 系统自带的打印队列窗口\n"
+                               "当应用内队列无法显示作业时，可使用此功能作为兜底\n"
+                               "（Windows 11 25H2 兼容）")
+
+        close_btn = ttk.Button(btn_frame, text="关闭", command=queue_dialog.destroy)
+        close_btn.pack(side="right")
+
+        # 初始加载
+        refresh_queue()
 
     # ============================================================
     # 拖拽支持
@@ -843,6 +1080,19 @@ class DuplexPrinterGUI:
                 self.progress_label.config(text=f"完成 {success}/{total}")
 
             self._set_printing_state(False)
+
+        elif event_type == "stats":
+            # 打印统计
+            self._log(f"\n{'='*50}")
+            self._log(f"打印统计")
+            self._log(f"{'='*50}")
+            self._log(f"  总页数:       {data['total_pages']}")
+            self._log(f"  总批次数:     {data['total_batches']}")
+            self._log(f"  成功批次:     {data['success_batches']}")
+            self._log(f"  失败批次:     {data['failed_batches']}")
+            self._log(f"  成功率:       {data['success_rate']:.1f}%")
+            self._log(f"  总耗时:       {data['elapsed_formatted']}")
+            self._log(f"{'='*50}")
 
         elif event_type == "error":
             self._log(f"错误: {data.get('message', '')}")
