@@ -1,0 +1,13 @@
+# PDF双面打印延迟控制脚本 - 运行时依赖
+# 安装: pip install -r requirements.txt
+
+pywin32>=306
+pypdf>=4.0
+
+# 说明:
+# - pywin32: Windows系统API封装 (win32print, win32api, win32con)
+# - pypdf:   PDF文件处理 (读取/拆分)
+# - tkinter: Python标准库内置，无需安装
+#
+# 打包工具（开发依赖，单独安装）:
+#   pip install pyinstaller
